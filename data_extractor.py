@@ -33,21 +33,21 @@ def main():
   """
   parser = argparse.ArgumentParser(description="Load PDF files from a directory.")
   parser.add_argument("input_path", help="Path to the directory containing PDF files.")
+  parser.add_argument("output_path", help="Path to the output directory.")
   args = parser.parse_args()
-  print('args= ', args)
+  print('args.input= ', args.input_path)
 
+  #filePath = input(r"Enter a program path: ")
   files = load_pdf_files(args.input_path)
   # Extract data
   if files:
     print(files)
     combined_pdf_text = backend.combine_pdf_text(files)
 
-    backend.data_extraction(combined_pdf_text)
+    backend.data_extraction(combined_pdf_text, args.output_path)
 
-
-
-print('hellow world!')
-main()
+if __name__ == '__main__':
+  main()
 
 
 

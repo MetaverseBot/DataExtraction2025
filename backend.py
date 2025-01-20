@@ -1,10 +1,13 @@
 import re
+import os
 import zipfile
 from urllib import response
 
 import PyPDF2
 from fpdf import FPDF
 import requests
+from datetime import datetime
+
 
 names_and_emails = [
     ["Chaofang Jin", "chaofangjin@example.com"],
@@ -57,7 +60,7 @@ names_and_emails = [
 ]
 
 
-def generate_pdf(name, list):
+def generate_pdf(name, list, outputPath):
     """
     This function generates a thank you letter PDF using the provided name.
 
@@ -85,7 +88,9 @@ def generate_pdf(name, list):
     # Set date
     pdf.set_text_color(0, 0, 0)
     pdf.set_font("Helvetica", size=12)
-    pdf.cell(0, 12, txt="12/5/2023", ln=1)
+    now = datetime.now()
+    current_date = now.strftime("%m/%d/%Y")
+    pdf.cell(0, 12, txt=current_date, ln=1)
 
     # Set body text
     for line in [
@@ -114,33 +119,28 @@ def generate_pdf(name, list):
 
     # Header row
     pdf.set_font("Helvetica", size=12, style="B")
-    pdf.cell(30, 6, txt="Record ID", border=1)
     pdf.cell(40, 6, txt="Contribution Date", border=1)
     pdf.cell(30, 6, txt="Amount", border=1)
     pdf.cell(50, 6, txt="Sponsor(s)", border=1)
-    pdf.cell(30, 6, txt="Payment Type", border=1)
+    pdf.cell(50, 6, txt="Payment Type", border=1)
     pdf.ln(6)  # Move to the next line
 
     data = []
 
     for item in list:
         if item[0] == name:
-            sort_list = []
-            sort_list.append("####")
-            sort_list.append(item[1])
-            sort_list.append(item[2])
-            sort_list.append(item[0])
-            sort_list.append(item[3])
+            now = datetime.now()
+            year = now.strftime("%Y")
+            sort_list = [item[1] + "/" + year, item[2], item[0], item[3]]
             data.append(sort_list)
 
     # Data rows
     pdf.set_font("Helvetica", size=12)
     for row in data:
-        pdf.cell(30, 6, txt=row[0], border=1)
-        pdf.cell(40, 6, txt=row[1], border=1)
-        pdf.cell(30, 6, txt=row[2], border=1)
+        pdf.cell(40, 6, txt=row[0], border=1)
+        pdf.cell(30, 6, txt=row[1], border=1)
+        pdf.cell(50, 6, txt=row[2], border=1)
         pdf.cell(50, 6, txt=row[3], border=1)
-        pdf.cell(30, 6, txt=row[4], border=1)
         pdf.ln(6)  # Move to the next line
 
     # Set footer
@@ -148,16 +148,15 @@ def generate_pdf(name, list):
     pdf.set_font("Helvetica", size=12)
     footer_text = [
         "\n",
-        "Contributions to AAPASD, a non-profit 501(c)(3) charitable organization effective 02/17/2023, are tax",
-        "deductible to the extent provided by law. Please retain this letter as receipt of your donation. In",
-        "accordance with IRS regulations, no goods or services were provided to the donor by AAPASD in",
-        "consideration of this contribution. Our Tax ID Number is 88-2564739",
+        "Contributions to AAPASD, a non-profit 501(c)(3) charitable organization, are tax deductible to the extent ",
+        "provided by law. Please retain this letter as receipt of your donation. Our Tax ID Number is 88-2564739.",
     ]
     for line in footer_text:
         pdf.cell(0, 6, txt=line, ln=1)
 
     # Output the PDF
-    pdf.output(rf"C:\Users\charl\PycharmProjects\DataExtraction2025\Output\Thank_You_Letter_{name}.pdf")  # Save the PDF
+    out_file_path = os.path.join(outputPath, f"Thank_You_Letter_{name}.pdf")
+    pdf.output(out_file_path)  # Save the PDF
     return pdf
 
 
@@ -169,7 +168,7 @@ def download_all_files(pdf_data_list):
         return f.read()
 
 
-def data_extraction(text):
+def data_extraction(text, output):
     text_into_lines = text.splitlines()
     payment_lines = [line for line in text_into_lines if "Payment From" in line]
 
@@ -198,9 +197,8 @@ def data_extraction(text):
     print(data)
 
     pdf_data_list = []
-
     for name, data_list in group_data_by_name(data):
-        pdf_data = generate_pdf(name, data_list)
+        pdf_data = generate_pdf(name, data_list, output)
         pdf_data_list.append((name, pdf_data))
         # st.download_button(name + ": Download", pdf_data.output(dest='S').encode('latin-1'), file_name=f"{name}.pdf")
         # with open(rf"C:\Users\charl\PycharmProjects\DataExtraction2025\Output\Thank_You_Letter_{name}.pdf", 'rb') as f:
