@@ -100,12 +100,17 @@ function parseAmount(line: string): string | null {
 }
 
 function parseName(lineRemainder: string): string | null {
-  const knownName = inferNameFromDirectory(lineRemainder);
+  const normalized = lineRemainder
+    .replace(/\$?[\d,]+\.\d{2}$/, "")
+    .replace(/\s+(?:Bac|Wfct|Cti)[A-Za-z0-9]+$/i, "")
+    .trim();
+
+  const knownName = inferNameFromDirectory(normalized);
   if (knownName) {
     return knownName;
   }
 
-  const fallbackMatch = lineRemainder.match(/^([A-Za-z]+(?:\s+[A-Za-z]+){0,3})\b/);
+  const fallbackMatch = normalized.match(/^([A-Za-z]+(?:\s+[A-Za-z]+){0,3})\b/);
   return fallbackMatch ? fallbackMatch[1].trim() : null;
 }
 

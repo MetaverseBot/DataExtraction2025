@@ -5,8 +5,9 @@ This app replaces the old CLI flow with a browser-based workflow:
 - Upload one or more donor statement PDFs
 - Extract donation records from lines containing `Payment From`
 - Store parsed records in Convex
-- Review saved batches
-- Generate donor thank-you letter PDFs in the browser
+- Step 1 output: download a contributions spreadsheet (`.csv`)
+- Step 2 input: upload/use spreadsheet and optionally set donation year
+- Step 2 output: all donor letters in one ZIP
 
 ## Tech Stack
 
@@ -44,6 +45,12 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
+
+## Access Password
+
+The app is protected by a password gate.
+
+- Password: `aapasddonors`
 
 ## Convex Functions
 
