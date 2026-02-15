@@ -89,7 +89,7 @@ export default function Home() {
   const [step2Spreadsheet, setStep2Spreadsheet] = useState<File | null>(null);
   const [step2SpreadsheetSource, setStep2SpreadsheetSource] = useState<
     "upload" | "current"
-  >("upload");
+  >("current");
   const [step2YearOverride, setStep2YearOverride] = useState<string>("");
   const [letterFormat, setLetterFormat] = useState<LetterFormat>("pdf");
   const [donationsViewMode, setDonationsViewMode] =
@@ -199,6 +199,14 @@ export default function Home() {
   const effectiveLetterYear = useMemo(() => {
     return parseYearOverride(step2YearOverride) ?? statementYear;
   }, [statementYear, step2YearOverride]);
+
+  useEffect(() => {
+    if (activeBatch) {
+      setStep2SpreadsheetSource("current");
+    } else {
+      setStep2SpreadsheetSource("upload");
+    }
+  }, [activeBatch]);
 
   const loadBatchDetails = useCallback(async (batchId: string) => {
     setError(null);
