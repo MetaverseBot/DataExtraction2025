@@ -1,0 +1,12 @@
+{
+  "name": "data-extraction-root",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix ./web run dev",
+    "build": "npm --prefix ./web run build",
+    "lint": "npm --prefix ./web run lint",
+    "start": "npm --prefix ./web run start",
+    "convex:dev": "npm --prefix ./web run convex:dev",
+    "convex:deploy": "npm --prefix ./web run convex:deploy"
+  }
+}

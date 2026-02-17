@@ -243,9 +243,7 @@ export async function getThankYouLetterBlob(
       pdf.setFontSize(11);
     }
 
-    const rowDate = donation.date.includes("/")
-      ? `${donation.date}/${currentYear}`
-      : donation.date;
+    const rowDate = normalizeContributionDate(donation.date, currentYear);
 
     pdf.rect(colX[0], rowY, colX[4] - colX[0], rowHeight);
     for (let i = 1; i < colX.length - 1; i += 1) {
@@ -301,9 +299,7 @@ export async function getThankYouLetterWordBlob(
 
   const rowsHtml = donations
     .map((donation) => {
-      const rowDate = donation.date.includes("/")
-        ? `${donation.date}/${year}`
-        : donation.date;
+      const rowDate = normalizeContributionDate(donation.date, year);
       const labeledPaymentType = donation.paymentType.toLowerCase().includes("payment")
         ? donation.paymentType
         : `${donation.paymentType} Payment`;
@@ -427,6 +423,19 @@ export async function getThankYouLetterWordBlob(
 </html>`;
 
   return new Blob([html], { type: "application/msword" });
+}
+
+function normalizeContributionDate(dateValue: string, fallbackYear: number): string {
+  const normalized = dateValue.trim();
+  if (/20\d{2}/.test(normalized)) {
+    return normalized;
+  }
+
+  if (/^\d{2}\/\d{2}$/.test(normalized)) {
+    return `${normalized}/${fallbackYear}`;
+  }
+
+  return normalized;
 }
 
 export async function downloadThankYouLetterWord(

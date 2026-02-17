@@ -87,6 +87,7 @@ export default function Home() {
   const [invalidLines, setInvalidLines] = useState<number>(0);
   const [isDownloadingAll, setIsDownloadingAll] = useState(false);
   const [step2Spreadsheet, setStep2Spreadsheet] = useState<File | null>(null);
+  const [step2UploadedRecords, setStep2UploadedRecords] = useState<DonationRecord[]>([]);
   const [step2SpreadsheetSource, setStep2SpreadsheetSource] = useState<
     "upload" | "current"
   >("current");
@@ -100,13 +101,16 @@ export default function Home() {
     useState<IndividualSortKey>("name");
   const [totalSortKey, setTotalSortKey] = useState<TotalSortKey>("name");
 
-  const groupedByDonor = useMemo(() => {
-    if (!activeBatch) {
-      return [];
+  const recordsForLetterGeneration = useMemo(() => {
+    if (step2SpreadsheetSource === "upload") {
+      return step2UploadedRecords;
     }
+    return activeBatch?.donations ?? [];
+  }, [activeBatch, step2SpreadsheetSource, step2UploadedRecords]);
 
+  const groupedByDonor = useMemo(() => {
     const grouped = new Map<string, DonationRecord[]>();
-    for (const row of activeBatch.donations) {
+    for (const row of recordsForLetterGeneration) {
       const existing = grouped.get(row.name) ?? [];
       existing.push(row);
       grouped.set(row.name, existing);
@@ -115,7 +119,7 @@ export default function Home() {
     return Array.from(grouped.entries()).sort(([nameA], [nameB]) =>
       nameA.localeCompare(nameB),
     );
-  }, [activeBatch]);
+  }, [recordsForLetterGeneration]);
 
   const donorTotals = useMemo(() => {
     const totals = new Map<string, DonorTotalRow>();
@@ -196,9 +200,28 @@ export default function Home() {
     return inferStatementYear(activeBatch.batch.fileNames);
   }, [activeBatch]);
 
+  const uploadedSpreadsheetYear = useMemo(() => {
+    for (const row of step2UploadedRecords) {
+      const match = row.date.match(/(20\d{2})/);
+      if (match) {
+        const year = Number(match[1]);
+        if (Number.isFinite(year) && year >= 2000 && year <= 2099) {
+          return year;
+        }
+      }
+    }
+    return undefined;
+  }, [step2UploadedRecords]);
+
   const effectiveLetterYear = useMemo(() => {
-    return parseYearOverride(step2YearOverride) ?? statementYear;
-  }, [statementYear, step2YearOverride]);
+    const override = parseYearOverride(step2YearOverride);
+    if (override !== undefined) {
+      return override;
+    }
+    return step2SpreadsheetSource === "upload"
+      ? uploadedSpreadsheetYear
+      : statementYear;
+  }, [statementYear, step2YearOverride, step2SpreadsheetSource, uploadedSpreadsheetYear]);
 
   useEffect(() => {
     if (activeBatch) {
@@ -288,7 +311,7 @@ export default function Home() {
       return;
     }
 
-    const csv = donationsToCsv(activeBatch.donations);
+    const csv = donationsToCsv(activeBatch.donations, statementYear);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -341,72 +364,25 @@ export default function Home() {
     }
   }
 
-  async function handleStep2(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError(null);
-
-    if (step2SpreadsheetSource === "upload" && !step2Spreadsheet) {
-      setError("Step 2 requires a spreadsheet CSV upload or choose current preview.");
-      return;
-    }
-
-    if (step2SpreadsheetSource === "current" && !activeBatch) {
-      setError("No current spreadsheet preview available. Select or extract a batch.");
+  async function handleStep2CsvFileChange(file: File | null) {
+    setStep2Spreadsheet(file);
+    setStep2SpreadsheetSource("upload");
+    if (!file) {
+      setStep2UploadedRecords([]);
       return;
     }
 
     try {
-      const records =
-        step2SpreadsheetSource === "current"
-          ? activeBatch?.donations ?? []
-          : parseDonationsCsv(await step2Spreadsheet!.text());
-
-      if (records.length === 0) {
-        throw new Error("No donation rows found in the spreadsheet.");
-      }
-
-      const grouped = new Map<string, DonationRecord[]>();
-      for (const row of records) {
-        const donorRows = grouped.get(row.name) ?? [];
-        donorRows.push(row);
-        grouped.set(row.name, donorRows);
-      }
-
-      const zip = new JSZip();
-      for (const [donorName, donations] of grouped) {
-        const firstYearMatch = donations[0]?.date.match(/(20\d{2})/);
-        const inferredYearFromRows = firstYearMatch
-          ? Number(firstYearMatch[1])
-          : undefined;
-        const overrideYear = parseYearOverride(step2YearOverride);
-        const finalYear =
-          overrideYear !== undefined
-            ? overrideYear
-            : step2SpreadsheetSource === "current"
-              ? statementYear ?? inferredYearFromRows
-              : inferredYearFromRows;
-
-        if (letterFormat === "word") {
-          const blob = await getThankYouLetterWordBlob(donorName, donations, finalYear);
-          zip.file(getThankYouLetterWordFileName(donorName), blob);
-        } else {
-          const blob = await getThankYouLetterBlob(donorName, donations, finalYear);
-          zip.file(getThankYouLetterFileName(donorName), blob);
-        }
-      }
-
-      const zipBlob = await zip.generateAsync({ type: "blob" });
-      const zipUrl = URL.createObjectURL(zipBlob);
-      const link = document.createElement("a");
-      link.href = zipUrl;
-      link.download = "AAPASD_letters_from_template.zip";
-      link.click();
-      URL.revokeObjectURL(zipUrl);
-    } catch (step2Error) {
+      const text = await file.text();
+      const records = parseDonationsCsv(text);
+      setStep2UploadedRecords(records);
+      setError(null);
+    } catch (csvError) {
+      setStep2UploadedRecords([]);
       const message =
-        step2Error instanceof Error
-          ? step2Error.message
-          : "Step 2 failed while generating donor letters.";
+        csvError instanceof Error
+          ? csvError.message
+          : "Could not parse uploaded CSV.";
       setError(message);
     }
   }
@@ -707,7 +683,7 @@ export default function Home() {
         <div className="panel-header">
           <h2 className="card-title">Step 2: Spreadsheet -&gt; Letters</h2>
         </div>
-        <form onSubmit={handleStep2} className="stack-sm">
+        <form className="stack-sm">
           <label className="input-label" htmlFor="step2-spreadsheet-source">
             Spreadsheet source
           </label>
@@ -743,10 +719,15 @@ export default function Home() {
             className="file-input"
             type="file"
             accept=".csv,text/csv"
-            onChange={(event) =>
-              setStep2Spreadsheet(event.currentTarget.files?.[0] ?? null)
-            }
+            onChange={(event) => {
+              void handleStep2CsvFileChange(event.currentTarget.files?.[0] ?? null);
+            }}
           />
+          <p className="muted-text">
+            {step2Spreadsheet
+              ? `Loaded ${step2UploadedRecords.length} rows from ${step2Spreadsheet.name}`
+              : "Upload a contributions CSV to generate donor letters from file."}
+          </p>
             </>
           ) : null}
 

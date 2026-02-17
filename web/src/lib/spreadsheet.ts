@@ -7,11 +7,14 @@ function escapeCsvCell(value: string): string {
   return value;
 }
 
-export function donationsToCsv(records: DonationRecord[]): string {
+export function donationsToCsv(
+  records: DonationRecord[],
+  defaultYear?: number,
+): string {
   const header = ["Name", "Date", "Amount", "Payment Type", "Email"];
   const rows = records.map((record) => [
     record.name,
-    record.date,
+    normalizeDateForCsv(record.date, defaultYear),
     record.amount,
     record.paymentType,
     record.email,
@@ -22,7 +25,19 @@ export function donationsToCsv(records: DonationRecord[]): string {
     .join("\n");
 }
 
-function parseCsvLine(line: string): string[] {
+function normalizeDateForCsv(dateValue: string, defaultYear?: number): string {
+  if (/20\d{2}/.test(dateValue)) {
+    return dateValue;
+  }
+
+  if (!defaultYear || !/^\d{2}\/\d{2}$/.test(dateValue.trim())) {
+    return dateValue;
+  }
+
+  return `${dateValue}/${defaultYear}`;
+}
+
+function parseCsvLine(line: string, delimiter: "," | "\t"): string[] {
   const cells: string[] = [];
   let current = "";
   let inQuotes = false;
@@ -40,7 +55,7 @@ function parseCsvLine(line: string): string[] {
       continue;
     }
 
-    if (char === "," && !inQuotes) {
+    if (char === delimiter && !inQuotes) {
       cells.push(current.trim());
       current = "";
       continue;
@@ -53,6 +68,34 @@ function parseCsvLine(line: string): string[] {
   return cells;
 }
 
+function normalizeHeaderCell(cell: string): string {
+  return cell
+    .replace(/^\uFEFF/, "")
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[_-]+/g, " ")
+    .replaceAll(/\s+/g, " ");
+}
+
+function findHeaderIndex(header: string[], aliases: string[]): number {
+  for (let i = 0; i < header.length; i += 1) {
+    const cell = header[i];
+    for (const alias of aliases) {
+      if (cell === alias || cell.startsWith(alias) || alias.startsWith(cell)) {
+        return i;
+      }
+    }
+  }
+
+  for (const alias of aliases) {
+    const idx = header.indexOf(alias);
+    if (idx !== -1) {
+      return idx;
+    }
+  }
+  return -1;
+}
+
 export function parseDonationsCsv(csvText: string): DonationRecord[] {
   const lines = csvText
     .split(/\r?\n/)
@@ -63,15 +106,33 @@ export function parseDonationsCsv(csvText: string): DonationRecord[] {
     return [];
   }
 
-  const rows = lines.map((line) => parseCsvLine(line));
-  const [header, ...dataRows] = rows;
-  const normalizedHeader = header.map((cell) => cell.toLowerCase());
+  const headerLine = lines[0];
+  const commaCount = (headerLine.match(/,/g) ?? []).length;
+  const tabCount = (headerLine.match(/\t/g) ?? []).length;
+  const delimiter: "," | "\t" = tabCount > commaCount ? "\t" : ",";
 
-  const nameIdx = normalizedHeader.indexOf("name");
-  const dateIdx = normalizedHeader.indexOf("date");
-  const amountIdx = normalizedHeader.indexOf("amount");
-  const paymentTypeIdx = normalizedHeader.indexOf("payment type");
-  const emailIdx = normalizedHeader.indexOf("email");
+  const rows = lines.map((line) => parseCsvLine(line, delimiter));
+  const [header, ...dataRows] = rows;
+  const normalizedHeader = header.map((cell) => normalizeHeaderCell(cell));
+
+  const nameIdx = findHeaderIndex(normalizedHeader, [
+    "name",
+    "donor",
+    "donor name",
+    "sponsor",
+    "sponsors",
+    "sponsor(s)",
+  ]);
+  const dateIdx = findHeaderIndex(normalizedHeader, ["date", "contribution date"]);
+  const amountIdx = findHeaderIndex(normalizedHeader, ["amount", "total amount"]);
+  const paymentTypeIdx = findHeaderIndex(normalizedHeader, [
+    "payment type",
+    "payment t",
+    "payment",
+    "payment method",
+    "type",
+  ]);
+  const emailIdx = findHeaderIndex(normalizedHeader, ["email", "e mail", "email address"]);
 
   if (nameIdx === -1 || dateIdx === -1 || amountIdx === -1 || paymentTypeIdx === -1) {
     throw new Error(
