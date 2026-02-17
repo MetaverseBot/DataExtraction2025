@@ -87,9 +87,6 @@ export default function Home() {
   const [invalidLines, setInvalidLines] = useState<number>(0);
   const [invalidExamples, setInvalidExamples] = useState<string[]>([]);
   const [isDownloadingAll, setIsDownloadingAll] = useState(false);
-  const [uploadedStatementUrls, setUploadedStatementUrls] = useState<
-    Record<string, string>
-  >({});
   const [step2Spreadsheet, setStep2Spreadsheet] = useState<File | null>(null);
   const [step2UploadedRecords, setStep2UploadedRecords] = useState<DonationRecord[]>([]);
   const [step2SpreadsheetSource, setStep2SpreadsheetSource] = useState<
@@ -235,14 +232,6 @@ export default function Home() {
     }
   }, [activeBatch]);
 
-  useEffect(() => {
-    return () => {
-      for (const url of Object.values(uploadedStatementUrls)) {
-        URL.revokeObjectURL(url);
-      }
-    };
-  }, [uploadedStatementUrls]);
-
   const loadBatchDetails = useCallback(async (batchId: string) => {
     setError(null);
     const response = await fetch(`/api/batches/${batchId}`, { cache: "no-store" });
@@ -281,16 +270,9 @@ export default function Home() {
     }
 
     const formData = new FormData();
-    const nextUploadedUrls: Record<string, string> = {};
     for (const file of files) {
       formData.append("files", file);
-      nextUploadedUrls[file.name] = URL.createObjectURL(file);
     }
-
-    for (const url of Object.values(uploadedStatementUrls)) {
-      URL.revokeObjectURL(url);
-    }
-    setUploadedStatementUrls(nextUploadedUrls);
 
     setIsUploading(true);
     try {
@@ -825,44 +807,12 @@ export default function Home() {
               const amount = Number(row.amount.replaceAll("$", "").replaceAll(",", ""));
               return Number.isFinite(amount) ? sum + amount : sum;
             }, 0);
-            const donorSourceFiles = Array.from(
-              new Set(
-                donations
-                  .map((donation) => donation.sourceFileName)
-                  .filter((name): name is string => Boolean(name)),
-              ),
-            );
-
             return (
               <article key={donorName} className="donor-card">
                 <h3>{donorName}</h3>
                 <p>
                   {donations.length} donation(s) - ${total.toFixed(2)} total
                 </p>
-                {donorSourceFiles.length > 0 ? (
-                  <div className="donor-actions">
-                    {donorSourceFiles.map((sourceFile) => {
-                      const sourceUrl = uploadedStatementUrls[sourceFile];
-                      return (
-                        <button
-                          key={`${donorName}-${sourceFile}`}
-                          type="button"
-                          className="secondary-btn donor-btn donor-btn-source"
-                          disabled={!sourceUrl}
-                          onClick={() => {
-                            if (sourceUrl) {
-                              window.open(sourceUrl, "_blank", "noopener,noreferrer");
-                            }
-                          }}
-                        >
-                          {sourceUrl
-                            ? `Open source: ${sourceFile}`
-                            : `Source unavailable: ${sourceFile}`}
-                        </button>
-                      );
-                    })}
-                  </div>
-                ) : null}
                 <button
                   type="button"
                   className="secondary-btn donor-btn donor-btn-download"
