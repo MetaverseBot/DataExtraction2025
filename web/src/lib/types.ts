@@ -4,4 +4,5 @@ export type DonationRecord = {
   amount: string;
   paymentType: string;
   email: string;
+  sourceFileName?: string;
 };

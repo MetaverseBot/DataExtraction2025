@@ -2,6 +2,7 @@ import { ConvexHttpClient } from "convex/browser";
 import { createRequire } from "node:module";
 import { NextResponse } from "next/server";
 import { extractDonationsFromText } from "@/lib/extraction";
+import { DonationRecord } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -34,19 +35,29 @@ export async function POST(request: Request) {
       );
     }
 
-    let fullText = "";
+    const records: DonationRecord[] = [];
+    let invalidLines = 0;
+    const invalidExamples: string[] = [];
+
     for (const file of files) {
       const buffer = Buffer.from(await file.arrayBuffer());
       const parsed = await pdfParse(buffer);
-      fullText += `${parsed.text}\n`;
+      const extracted = extractDonationsFromText(parsed.text, file.name);
+      records.push(...extracted.records);
+      invalidLines += extracted.invalidLines;
+      for (const line of extracted.invalidExamples) {
+        if (invalidExamples.length < 15) {
+          invalidExamples.push(`${file.name}: ${line}`);
+        }
+      }
     }
 
-    const { records, invalidLines } = extractDonationsFromText(fullText);
     if (records.length === 0) {
       return NextResponse.json(
         {
           error: "No payment entries matched the parser.",
           invalidLines,
+          invalidExamples,
         },
         { status: 422 },
       );
@@ -58,7 +69,12 @@ export async function POST(request: Request) {
       records,
     });
 
-    return NextResponse.json({ batchId, count: records.length, invalidLines });
+    return NextResponse.json({
+      batchId,
+      count: records.length,
+      invalidLines,
+      invalidExamples,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });

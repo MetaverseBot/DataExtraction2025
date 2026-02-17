@@ -11,6 +11,7 @@ export const saveBatch = mutation({
         amount: v.string(),
         paymentType: v.string(),
         email: v.string(),
+        sourceFileName: v.optional(v.string()),
       }),
     ),
   },

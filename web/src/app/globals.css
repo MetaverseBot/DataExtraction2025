@@ -156,6 +156,13 @@ body {
   color: #8a5b21;
 }
 
+.invalid-list {
+  margin: 0.4rem 0 0;
+  padding-left: 1rem;
+  color: var(--color-muted);
+  font-size: 0.86rem;
+}
+
 .panel-header {
   display: flex;
   align-items: center;
@@ -236,18 +243,53 @@ thead th {
 .donor-card {
   border: 1px solid #eed9bf;
   border-radius: 0.8rem;
-  padding: 0.75rem;
+  padding: 0.95rem;
   background: linear-gradient(180deg, #fffefc 0%, #fff7ef 100%);
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 0.55rem;
 }
 
 .donor-card h3 {
   margin: 0;
-  font-size: 1.04rem;
+  font-size: 1.15rem;
+  line-height: 1.2;
 }
 
 .donor-card p {
-  margin: 0.4rem 0 0.7rem;
+  margin: 0;
   color: var(--color-muted);
+  min-height: 1.3rem;
+}
+
+.donor-actions {
+  display: grid;
+  gap: 0.45rem;
+  align-content: start;
+}
+
+.donor-btn {
+  width: 100%;
+  border-radius: 0.75rem;
+  padding: 0.6rem 0.7rem;
+  text-align: left;
+  line-height: 1.25;
+  font-size: 0.95rem;
+}
+
+.donor-btn-source {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.donor-btn-download {
+  text-align: center;
+  margin-top: 0.2rem;
+}
+
+.donor-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 @media (max-width: 880px) {

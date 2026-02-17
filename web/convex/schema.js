@@ -15,6 +15,7 @@ export default defineSchema({
     amount: v.string(),
     paymentType: v.string(),
     email: v.string(),
+    sourceFileName: v.optional(v.string()),
   })
     .index("by_batchId", ["batchId"])
     .index("by_name", ["name"]),

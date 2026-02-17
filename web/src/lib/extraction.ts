@@ -1,7 +1,6 @@
 import { donorDirectory, donorNames } from "@/lib/donorDirectory";
 import { DonationRecord } from "@/lib/types";
 
-const MAX_REASONABLE_DONATION = 1000;
 
 function inferNameFromDirectory(text: string): string | null {
   const matchedName = donorNames.find((name) => text.includes(name));
@@ -17,25 +16,6 @@ function formatAmount(amount: string): string {
   return `$${value.toFixed(2)}`;
 }
 
-function chooseReasonableDollars(intPart: string): number | null {
-  let bestCandidate: number | null = null;
-
-  for (let suffixLen = 1; suffixLen <= Math.min(4, intPart.length); suffixLen += 1) {
-    const dollars = Number(intPart.slice(-suffixLen));
-    if (!Number.isFinite(dollars) || dollars <= 0) {
-      continue;
-    }
-
-    if (dollars <= MAX_REASONABLE_DONATION) {
-      if (bestCandidate === null || dollars > bestCandidate) {
-        bestCandidate = dollars;
-      }
-    }
-  }
-
-  return bestCandidate;
-}
-
 function normalizeEmail(name: string): string {
   const email = donorDirectory.get(name);
   if (!email) {
@@ -49,60 +29,48 @@ function normalizeEmail(name: string): string {
   return email;
 }
 
-function parseAmount(line: string): string | null {
-  const currencyMatch = line.match(/\$([\d,]+\.\d{2})$/);
-  if (currencyMatch) {
-    const [dollarsRaw, cents] = currencyMatch[1].split(".");
-    const intPart = dollarsRaw.replaceAll(",", "");
-    const numeric = Number(intPart);
-
-    if (Number.isFinite(numeric) && numeric <= MAX_REASONABLE_DONATION) {
-      return formatAmount(currencyMatch[1]);
-    }
-
-    const fixed = chooseReasonableDollars(intPart);
-    if (fixed !== null) {
-      return formatAmount(`${fixed}.${cents}`);
-    }
-
-    return formatAmount(currencyMatch[1]);
+function parseTail(lineRemainder: string):
+  | { nameSegment: string; transactionId: string; amount: string }
+  | null {
+  const strictSplit = lineRemainder.match(
+    /^(.+?)\s+([A-Za-z0-9]+)\s+(\$?\d{1,4}(?:,\d{3})*\.\d{2})$/,
+  );
+  if (strictSplit) {
+    return {
+      nameSegment: strictSplit[1],
+      transactionId: strictSplit[2],
+      amount: strictSplit[3],
+    };
   }
 
-  const finalNumber = line.match(/(\d+)\.(\d{2})$/);
-  if (!finalNumber) {
-    return null;
+  const mergedAlphaId = lineRemainder.match(
+    /^(.+?)\s+([A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*)(?:\$)?([1-9]\d{0,3}\.\d{2})$/,
+  );
+  if (mergedAlphaId) {
+    return {
+      nameSegment: mergedAlphaId[1],
+      transactionId: mergedAlphaId[2],
+      amount: mergedAlphaId[3],
+    };
   }
 
-  const intPart = finalNumber[1];
-  const cents = finalNumber[2];
-
-  if (intPart.length <= 4) {
-    const numeric = Number(intPart);
-    if (Number.isFinite(numeric) && numeric <= MAX_REASONABLE_DONATION) {
-      return formatAmount(`${intPart}.${cents}`);
-    }
-
-    const fixed = chooseReasonableDollars(intPart);
-    if (fixed !== null) {
-      return formatAmount(`${fixed}.${cents}`);
-    }
-
-    return formatAmount(`${intPart}.${cents}`);
+  const mergedNumericId = lineRemainder.match(
+    /^(.+?)\s+(\d{8,14})(?:\$)?([1-9]\d{0,3}\.\d{2})$/,
+  );
+  if (mergedNumericId) {
+    return {
+      nameSegment: mergedNumericId[1],
+      transactionId: mergedNumericId[2],
+      amount: mergedNumericId[3],
+    };
   }
 
-  const bestCandidate = chooseReasonableDollars(intPart);
-
-  if (bestCandidate !== null) {
-    return formatAmount(`${bestCandidate}.${cents}`);
-  }
-
-  return formatAmount(`${intPart.slice(-3)}.${cents}`);
+  return null;
 }
 
-function parseName(lineRemainder: string): string | null {
-  const normalized = lineRemainder
-    .replace(/\$?[\d,]+\.\d{2}$/, "")
-    .replace(/\s+(?:Bac|Wfct|Cti)[A-Za-z0-9]+$/i, "")
+function parseName(nameSegment: string): string | null {
+  const normalized = nameSegment
+    .replace(/\s+/g, " ")
     .trim();
 
   const knownName = inferNameFromDirectory(normalized);
@@ -114,7 +82,7 @@ function parseName(lineRemainder: string): string | null {
   return fallbackMatch ? fallbackMatch[1].trim() : null;
 }
 
-function parsePaymentLine(line: string): DonationRecord | null {
+function parsePaymentLine(line: string, sourceFileName?: string): DonationRecord | null {
   const dateMatch = line.match(/^(\d{2}\/\d{2})/);
   const paymentTypeMatch = line.match(
     /^\d{2}\/\d{2}\s*([A-Za-z ]+?)\s+Payment\s+From\b/i,
@@ -128,10 +96,17 @@ function parsePaymentLine(line: string): DonationRecord | null {
   const date = dateMatch[1];
   const paymentType = paymentTypeMatch[1].trim();
   const lineRemainder = line.slice(fromIndex + "Payment From".length).trim();
-  const name = parseName(lineRemainder);
-  const amount = parseAmount(line);
 
-  if (!name || !amount) {
+  const tail = parseTail(lineRemainder);
+  if (!tail) {
+    return null;
+  }
+
+  const name = parseName(tail.nameSegment);
+  const amount = formatAmount(tail.amount);
+  const amountValue = Number(amount.replaceAll("$", "").replaceAll(",", ""));
+
+  if (!name || !amount || !Number.isFinite(amountValue) || amountValue <= 0) {
     return null;
   }
 
@@ -141,12 +116,17 @@ function parsePaymentLine(line: string): DonationRecord | null {
     amount,
     paymentType,
     email: normalizeEmail(name),
+    sourceFileName,
   };
 }
 
-export function extractDonationsFromText(text: string): {
+export function extractDonationsFromText(
+  text: string,
+  sourceFileName?: string,
+): {
   records: DonationRecord[];
   invalidLines: number;
+  invalidExamples: string[];
 } {
   const paymentLines = text
     .split(/\r?\n/)
@@ -155,15 +135,19 @@ export function extractDonationsFromText(text: string): {
 
   const records: DonationRecord[] = [];
   let invalidLines = 0;
+  const invalidExamples: string[] = [];
 
   for (const line of paymentLines) {
-    const record = parsePaymentLine(line);
+    const record = parsePaymentLine(line, sourceFileName);
     if (record) {
       records.push(record);
     } else {
       invalidLines += 1;
+      if (invalidExamples.length < 10) {
+        invalidExamples.push(line);
+      }
     }
   }
 
-  return { records, invalidLines };
+  return { records, invalidLines, invalidExamples };
 }

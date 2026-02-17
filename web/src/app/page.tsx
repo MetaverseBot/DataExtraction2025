@@ -85,7 +85,11 @@ export default function Home() {
   const [selectedBatchId, setSelectedBatchId] = useState<string>("");
   const [activeBatch, setActiveBatch] = useState<BatchDetail | null>(null);
   const [invalidLines, setInvalidLines] = useState<number>(0);
+  const [invalidExamples, setInvalidExamples] = useState<string[]>([]);
   const [isDownloadingAll, setIsDownloadingAll] = useState(false);
+  const [uploadedStatementUrls, setUploadedStatementUrls] = useState<
+    Record<string, string>
+  >({});
   const [step2Spreadsheet, setStep2Spreadsheet] = useState<File | null>(null);
   const [step2UploadedRecords, setStep2UploadedRecords] = useState<DonationRecord[]>([]);
   const [step2SpreadsheetSource, setStep2SpreadsheetSource] = useState<
@@ -231,6 +235,14 @@ export default function Home() {
     }
   }, [activeBatch]);
 
+  useEffect(() => {
+    return () => {
+      for (const url of Object.values(uploadedStatementUrls)) {
+        URL.revokeObjectURL(url);
+      }
+    };
+  }, [uploadedStatementUrls]);
+
   const loadBatchDetails = useCallback(async (batchId: string) => {
     setError(null);
     const response = await fetch(`/api/batches/${batchId}`, { cache: "no-store" });
@@ -269,9 +281,16 @@ export default function Home() {
     }
 
     const formData = new FormData();
+    const nextUploadedUrls: Record<string, string> = {};
     for (const file of files) {
       formData.append("files", file);
+      nextUploadedUrls[file.name] = URL.createObjectURL(file);
     }
+
+    for (const url of Object.values(uploadedStatementUrls)) {
+      URL.revokeObjectURL(url);
+    }
+    setUploadedStatementUrls(nextUploadedUrls);
 
     setIsUploading(true);
     try {
@@ -286,6 +305,7 @@ export default function Home() {
       }
 
       setInvalidLines(data.invalidLines ?? 0);
+      setInvalidExamples(Array.isArray(data.invalidExamples) ? data.invalidExamples : []);
       await loadBatches();
 
       if (data.batchId) {
@@ -472,6 +492,16 @@ export default function Home() {
                 {invalidLines} payment line(s) were skipped due to format mismatch.
               </p>
             ) : null}
+            {invalidExamples.length > 0 ? (
+              <details>
+                <summary className="muted-text">Show skipped lines</summary>
+                <ul className="invalid-list">
+                  {invalidExamples.map((line, index) => (
+                    <li key={`${line}-${index}`}>{line}</li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
             {error ? <p className="error-text">{error}</p> : null}
           </form>
         </article>
@@ -644,13 +674,14 @@ export default function Home() {
                   <th>Amount</th>
                   <th>Payment Type</th>
                   <th>Email</th>
+                  <th>Source File</th>
                 </tr>
               </thead>
               <tbody>
                 {groupIndividualByPerson
                   ? groupedIndividualDonations.flatMap(([donorName, rows]) => [
                       <tr key={`group-${donorName}`} className="group-row">
-                        <td colSpan={5}>
+                        <td colSpan={6}>
                           <strong>{donorName}</strong> - {rows.length} donation(s)
                         </td>
                       </tr>,
@@ -661,6 +692,7 @@ export default function Home() {
                           <td>{record.amount}</td>
                           <td>{record.paymentType}</td>
                           <td>{record.email}</td>
+                          <td>{record.sourceFileName ?? "N/A"}</td>
                         </tr>
                       )),
                     ])
@@ -671,6 +703,7 @@ export default function Home() {
                         <td>{record.amount}</td>
                         <td>{record.paymentType}</td>
                         <td>{record.email}</td>
+                        <td>{record.sourceFileName ?? "N/A"}</td>
                       </tr>
                     ))}
               </tbody>
@@ -792,6 +825,13 @@ export default function Home() {
               const amount = Number(row.amount.replaceAll("$", "").replaceAll(",", ""));
               return Number.isFinite(amount) ? sum + amount : sum;
             }, 0);
+            const donorSourceFiles = Array.from(
+              new Set(
+                donations
+                  .map((donation) => donation.sourceFileName)
+                  .filter((name): name is string => Boolean(name)),
+              ),
+            );
 
             return (
               <article key={donorName} className="donor-card">
@@ -799,9 +839,33 @@ export default function Home() {
                 <p>
                   {donations.length} donation(s) - ${total.toFixed(2)} total
                 </p>
+                {donorSourceFiles.length > 0 ? (
+                  <div className="donor-actions">
+                    {donorSourceFiles.map((sourceFile) => {
+                      const sourceUrl = uploadedStatementUrls[sourceFile];
+                      return (
+                        <button
+                          key={`${donorName}-${sourceFile}`}
+                          type="button"
+                          className="secondary-btn donor-btn donor-btn-source"
+                          disabled={!sourceUrl}
+                          onClick={() => {
+                            if (sourceUrl) {
+                              window.open(sourceUrl, "_blank", "noopener,noreferrer");
+                            }
+                          }}
+                        >
+                          {sourceUrl
+                            ? `Open source: ${sourceFile}`
+                            : `Source unavailable: ${sourceFile}`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
                 <button
                   type="button"
-                  className="secondary-btn"
+                  className="secondary-btn donor-btn donor-btn-download"
                   onClick={() =>
                     letterFormat === "word"
                       ? downloadThankYouLetterWord(
