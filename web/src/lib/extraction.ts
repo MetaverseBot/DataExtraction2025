@@ -55,7 +55,7 @@ function parseTail(lineRemainder: string):
   }
 
   const mergedNumericId = lineRemainder.match(
-    /^(.+?)\s+(\d{8,14})(?:\$)?([1-9]\d{0,3}\.\d{2})$/,
+    /^(.+?)\s+(\d{8,14})(?:\$)?([1-9]\d{1,3}\.\d{2})$/,
   );
   if (mergedNumericId) {
     return {

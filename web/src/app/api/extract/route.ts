@@ -1,7 +1,7 @@
-import { ConvexHttpClient } from "convex/browser";
 import { createRequire } from "node:module";
 import { NextResponse } from "next/server";
 import { extractDonationsFromText } from "@/lib/extraction";
+import { getSupabaseAdmin } from "@/lib/supabaseServer";
 import { DonationRecord } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -10,16 +10,6 @@ const require = createRequire(import.meta.url);
 const pdfParse = require("pdf-parse/lib/pdf-parse.js") as (
   dataBuffer: Buffer,
 ) => Promise<{ text: string }>;
-
-function getConvexClient() {
-  const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
-  if (!convexUrl) {
-    throw new Error("NEXT_PUBLIC_CONVEX_URL is not set.");
-  }
-  return new ConvexHttpClient(convexUrl) as unknown as {
-    mutation: (name: string, args: unknown) => Promise<string>;
-  };
-}
 
 export async function POST(request: Request) {
   try {
@@ -63,14 +53,43 @@ export async function POST(request: Request) {
       );
     }
 
-    const convex = getConvexClient();
-    const batchId = await convex.mutation("donations:saveBatch", {
-      fileNames: files.map((file) => file.name),
-      records,
-    });
+    const supabase = getSupabaseAdmin();
+    const now = new Date();
+
+    const { data: batch, error: batchError } = await supabase
+      .from("donation_batches")
+      .insert({
+        created_at: now.toISOString(),
+        file_names: files.map((file) => file.name),
+        total_records: records.length,
+      })
+      .select("id")
+      .single();
+
+    if (batchError || !batch) {
+      throw new Error(batchError?.message ?? "Failed to create extraction batch.");
+    }
+
+    const donationRows = records.map((record) => ({
+      batch_id: batch.id,
+      name: record.name,
+      date: record.date,
+      amount: record.amount,
+      payment_type: record.paymentType,
+      email: record.email,
+      source_file_name: record.sourceFileName ?? null,
+    }));
+
+    const { error: donationInsertError } = await supabase
+      .from("donations")
+      .insert(donationRows);
+
+    if (donationInsertError) {
+      throw new Error(donationInsertError.message);
+    }
 
     return NextResponse.json({
-      batchId,
+      batchId: batch.id,
       count: records.length,
       invalidLines,
       invalidExamples,

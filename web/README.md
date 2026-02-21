@@ -8,6 +8,7 @@ This app replaces the old CLI flow with a browser-based workflow:
 - Step 1 output: download a contributions spreadsheet (`.csv`)
 - Step 2 input: upload/use spreadsheet and optionally set donation year
 - Step 2 output: all donor letters in one ZIP
+- Summer camp workflow: statement -> payment sheet -> camp-data merge -> camp receipts + email drafts
 
 ## Tech Stack
 

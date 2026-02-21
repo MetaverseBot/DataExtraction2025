@@ -1,23 +1,28 @@
-import { ConvexHttpClient } from "convex/browser";
 import { NextResponse } from "next/server";
+import { getSupabaseAdmin } from "@/lib/supabaseServer";
 
 export const runtime = "nodejs";
 
-function getConvexClient() {
-  const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
-  if (!convexUrl) {
-    throw new Error("NEXT_PUBLIC_CONVEX_URL is not set.");
-  }
-
-  return new ConvexHttpClient(convexUrl) as unknown as {
-    query: (name: string, args: unknown) => Promise<unknown>;
-  };
-}
-
 export async function GET() {
   try {
-    const convex = getConvexClient();
-    const batches = await convex.query("donations:getRecentBatches", {});
+    const supabase = getSupabaseAdmin();
+    const { data, error } = await supabase
+      .from("donation_batches")
+      .select("id, created_at, total_records, file_names")
+      .order("created_at", { ascending: false })
+      .limit(30);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    const batches = (data ?? []).map((row) => ({
+      _id: row.id,
+      createdAt: new Date(row.created_at).getTime(),
+      totalRecords: row.total_records,
+      fileNames: row.file_names,
+    }));
+
     return NextResponse.json({ batches });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";

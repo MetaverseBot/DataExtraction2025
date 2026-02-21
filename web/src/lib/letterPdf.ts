@@ -1,5 +1,6 @@
 import { jsPDF } from "jspdf";
 import { DonationRecord } from "@/lib/types";
+import { CampPaymentRow } from "@/lib/spreadsheet";
 
 type LetterOptions = {
   statementYear?: number;
@@ -104,7 +105,7 @@ export function getThankYouLetterFileName(name: string): string {
 
 export function getThankYouLetterWordFileName(name: string): string {
   const safeName = name.replaceAll(/[^a-zA-Z0-9_-]/g, "_");
-  return `Thank_You_Letter_${safeName}.doc`;
+  return `Thank_You_Letter_${safeName}.docx`;
 }
 
 export async function getThankYouLetterBlob(
@@ -287,15 +288,34 @@ function escapeHtml(value: string): string {
 export async function getThankYouLetterWordBlob(
   name: string,
   donations: DonationRecord[],
-  statementYear?: number,
+  statementYearOrOptions?: number | LetterOptions,
 ): Promise<Blob> {
+  const options: LetterOptions =
+    typeof statementYearOrOptions === "number"
+      ? { statementYear: statementYearOrOptions }
+      : statementYearOrOptions ?? {};
+
   const logoDataUrl = await getWordLogoDataUrl();
-  const year = statementYear ?? new Date().getFullYear();
+  const year = options.statementYear ?? new Date().getFullYear();
   const today = new Date().toLocaleDateString("en-US", {
     month: "long",
     day: "numeric",
     year: "numeric",
   });
+
+  const totalAmount = donations.reduce((sum, row) => {
+    const value = Number(row.amount.replaceAll("$", "").replaceAll(",", ""));
+    return Number.isFinite(value) ? sum + value : sum;
+  }, 0);
+  const bodyLines = buildLetterBody(name, options.templateText, donations.length, totalAmount);
+  const bodyHtml = bodyLines
+    .map((line) => {
+      if (!line.trim()) {
+        return "<p>&nbsp;</p>";
+      }
+      return `<p>${escapeHtml(line)}</p>`;
+    })
+    .join("\n");
 
   const rowsHtml = donations
     .map((donation) => {
@@ -391,17 +411,8 @@ export async function getThankYouLetterWordBlob(
     </table>
 
     <div class="date-line">${escapeHtml(today)}</div>
-    <p>Dear ${escapeHtml(name)},</p>
-
-    <p>On behalf of the Asian American Parent Alliance of San Diego (AAPASD), we would like to thank you very much for your support to AAPASD. Your care for the education of the youths will certainly have a great positive impact on their lives and on the future of our community.</p>
-
-    <p>Fostering Asian American community participation and providing a platform to advocate for-merit-based education in San Diego County are the missions we are devoted to. Without your continuing support, we can never achieve these noble goals. Your support is the foundation of our organization.</p>
-
-    <p>If you have any questions about your donation or suggestion about how to improve this organization, please contact us based on the information provided above. If you wish to work with us as a volunteer, also kindly let us know.</p>
-
-    <p>Thank you again for your confidence and generosity!</p>
-    <p>Sincerely,</p>
-    <p>Team AAPASD<br/><a class="link" href="mailto:Accounting@AAPASD.org">Accounting@AAPASD.org</a></p>
+    ${bodyHtml}
+    <p><a class="link" href="mailto:Accounting@AAPASD.org">Accounting@AAPASD.org</a></p>
 
     <table class="data-table">
       <thead>
@@ -441,15 +452,215 @@ function normalizeContributionDate(dateValue: string, fallbackYear: number): str
 export async function downloadThankYouLetterWord(
   name: string,
   donations: DonationRecord[],
-  statementYear?: number,
+  statementYearOrOptions?: number | LetterOptions,
 ) {
-  const blob = await getThankYouLetterWordBlob(name, donations, statementYear);
+  const blob = await getThankYouLetterWordBlob(name, donations, statementYearOrOptions);
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
   link.download = getThankYouLetterWordFileName(name);
   link.click();
   URL.revokeObjectURL(url);
+}
+
+export async function getCampReceiptLetterBlob(
+  parentName: string,
+  payments: CampPaymentRow[],
+  templateText?: string,
+): Promise<Blob> {
+  const pdf = new jsPDF({ unit: "pt", format: "letter" });
+  const marginLeft = 36;
+  const contentWidth = 540;
+  let y = 42;
+
+  pdf.setFont("helvetica", "normal");
+  pdf.setFontSize(21);
+  pdf.text("Asian American Parent Alliance of San Diego", marginLeft, y);
+
+  const logoDataUrl = await getLogoDataUrl();
+  if (logoDataUrl) {
+    pdf.addImage(logoDataUrl, "JPEG", 485, 24, 90, 90);
+  }
+
+  y += 30;
+  pdf.setFontSize(13);
+  pdf.text("4653 Carmel Mountain Rd, # 308-220", marginLeft, y);
+  y += 19;
+  pdf.text("San Diego, CA 92130", marginLeft, y);
+  y += 19;
+  pdf.setTextColor(30, 90, 210);
+  pdf.text("www.AAPASD.org Email: info@AAPASD.org", marginLeft, y);
+  y += 28;
+
+  pdf.setTextColor(0, 0, 0);
+  pdf.setFontSize(16);
+  pdf.text(
+    new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }),
+    marginLeft,
+    y,
+  );
+
+  y += 30;
+  pdf.setFontSize(12);
+  const body = buildCampBody(parentName, payments, templateText);
+
+  for (const line of body) {
+    if (!line.trim()) {
+      y += 6;
+      continue;
+    }
+
+    const wrapped = pdf.splitTextToSize(line, contentWidth);
+    pdf.text(wrapped, marginLeft, y);
+    y += wrapped.length * 13 + 2;
+  }
+
+  pdf.setTextColor(30, 90, 210);
+  pdf.text("Accounting@AAPASD.org", marginLeft, y);
+  pdf.setTextColor(0, 0, 0);
+  y += 18;
+
+  const headers = ["Payment Date", "Camp Dates", "Amount", "Paid By", "Camper Name"];
+  const colX = [36, 120, 252, 332, 448, 576];
+  const rowH = 24;
+
+  const requiredTableHeight = rowH * (payments.length + 1) + 40;
+  if (y + requiredTableHeight > 760) {
+    pdf.addPage("letter", "portrait");
+    y = 50;
+  }
+
+  pdf.setFont("helvetica", "bold");
+  pdf.rect(colX[0], y, colX[colX.length - 1] - colX[0], rowH);
+  for (let i = 1; i < colX.length - 1; i += 1) {
+    pdf.line(colX[i], y, colX[i], y + rowH);
+  }
+  headers.forEach((h, i) => pdf.text(h, colX[i] + 4, y + 16));
+
+  pdf.setFont("helvetica", "normal");
+  for (const row of payments) {
+    y += rowH;
+    pdf.rect(colX[0], y, colX[colX.length - 1] - colX[0], rowH);
+    for (let i = 1; i < colX.length - 1; i += 1) {
+      pdf.line(colX[i], y, colX[i], y + rowH);
+    }
+    const vals = [row.paymentDate, row.campDates, row.amount, row.paidBy, row.camperName];
+    vals.forEach((v, i) => pdf.text(v || "", colX[i] + 4, y + 16));
+  }
+
+  y += 34;
+  pdf.setFontSize(9);
+  pdf.text(
+    "Asian American Parent Alliance of San Diego (AAPASD) is a nonprofit 501(c)(3) organization.",
+    36,
+    y,
+  );
+  pdf.text("Tax ID: 88-2564739. Please retain this letter as receipt of your payment.", 36, y + 11);
+
+  return pdf.output("blob");
+}
+
+function buildCampBody(
+  parentName: string,
+  payments: CampPaymentRow[],
+  templateText?: string,
+): string[] {
+  if (templateText && templateText.trim()) {
+    const today = new Date().toLocaleDateString("en-US", {
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    });
+
+    const first = payments[0];
+    const totalAmount = payments.reduce((sum, row) => {
+      const value = Number(row.amount.replaceAll("$", "").replaceAll(",", ""));
+      return Number.isFinite(value) ? sum + value : sum;
+    }, 0);
+
+    const normalizedTemplate = templateText
+      .replace(/\u00A0/g, " ")
+      .replace(/\r\n/g, "\n");
+
+    const replaced = normalizedTemplate
+      .replace(/\[\s*date\s*\]/gi, today)
+      .replace(/\[\s*parent\s*[^\]]*guardian\s*name\s*\]/gi, parentName)
+      .replace(/\[\s*parent\s*name\s*\]/gi, parentName)
+      .replace(/\[\s*paid\s*date\s*\]/gi, first?.paymentDate ?? "")
+      .replace(/\[\s*camp\s*dates\s*\]/gi, first?.campDates ?? "")
+      .replace(/\[\s*camper\s*name\s*\]/gi, first?.camperName ?? "")
+      .replace(/\$\s*\$/g, `$${totalAmount.toFixed(2)}`)
+      .replace(/Dear\s*\[[^\]]+\]/gi, `Dear ${parentName},`)
+      .replace(/\[[^\]]+\]/g, "");
+
+    const filtered = replaced
+      .split(/\r?\n/)
+      .map((line) => line.trimEnd())
+      .filter(
+        (line) =>
+          !/^\s*Asian\s+American\s+Parent\s+Alliance\s+of\s+San\s+Diego\s*$/i.test(line) &&
+          !/^\s*4653\s+Carmel\s+Mountain\s+Rd.*$/i.test(line) &&
+          !/^\s*San\s+Diego,\s*CA\s*92130\s*$/i.test(line) &&
+          !/^\s*www\.AAPASD\.org\s*Email:\s*info@AAPASD\.org\s*$/i.test(line) &&
+          !/^\s*[A-Za-z]+\s+\d{1,2},\s*20\d{2}\s*$/i.test(line) &&
+          !/^\s*Payment\s*Date\s*$/i.test(line) &&
+          !/^\s*Camp\s*Dates\s*$/i.test(line) &&
+          !/^\s*Amount\s*$/i.test(line) &&
+          !/^\s*Paid\s*By\s*$/i.test(line) &&
+          !/^\s*Camper\s*Name\s*$/i.test(line) &&
+          !/^\s*Asian\s+American\s+Parent\s+Alliance\s+of\s+San\s+Diego\s*\(AAPASD\).*/i.test(line) &&
+          !/\[\s*Paid\s*Date\s*\]/i.test(line) &&
+          !/\[\s*Camp\s*Dates\s*\]/i.test(line) &&
+          !/\[\s*Camper\s*Name\s*\]/i.test(line),
+      );
+
+    return compactTemplateLines(filtered);
+  }
+
+  return compactTemplateLines([
+    `Dear ${parentName},`,
+    "",
+    "Thank you for enrolling your child in our summer camp program. This letter serves as",
+    "your official payment receipt for our summer camp as listed below.",
+    "",
+    "We are excited to provide a meaningful and enriching experience for our students",
+    "through engaging educational and community-building activities.",
+    "",
+    "If you have any questions regarding your registration or payment, please feel free to",
+    "contact us using the information above.",
+    "",
+    "Sincerely,",
+    "",
+    "Team AAPASD",
+  ]);
+}
+
+function compactTemplateLines(lines: string[]): string[] {
+  const out: string[] = [];
+  let blankRun = 0;
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) {
+      blankRun += 1;
+      if (blankRun <= 1) {
+        out.push("");
+      }
+      continue;
+    }
+
+    blankRun = 0;
+    out.push(line);
+  }
+
+  while (out.length > 0 && !out[0].trim()) {
+    out.shift();
+  }
+  while (out.length > 0 && !out[out.length - 1].trim()) {
+    out.pop();
+  }
+
+  return out;
 }
 
 function buildLetterBody(
