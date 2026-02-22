@@ -32,8 +32,92 @@ function normalizeEmail(name: string): string {
 function parseTail(lineRemainder: string):
   | { nameSegment: string; transactionId: string; amount: string }
   | null {
+  const amountPattern = /^\$?\d{1,4}(?:,\d{3})*\.\d{2}$/;
+
+  const columns = lineRemainder
+    .split(/\s{2,}/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+
+  if (columns.length >= 2) {
+    const amountColumnIndex = columns.findIndex(
+      (part, index) => index > 0 && amountPattern.test(part),
+    );
+
+    if (amountColumnIndex > 0) {
+      const descriptor = columns.slice(0, amountColumnIndex).join(" ").trim();
+      const amount = columns[amountColumnIndex];
+
+      const spacedId = descriptor.match(/^(.+?)\s+([A-Za-z0-9]{6,})$/);
+      if (spacedId) {
+        return {
+          nameSegment: spacedId[1],
+          transactionId: spacedId[2],
+          amount,
+        };
+      }
+
+      const mergedId = descriptor.match(/^(.+?)([A-Za-z0-9]{6,})$/);
+      if (mergedId) {
+        return {
+          nameSegment: mergedId[1],
+          transactionId: mergedId[2],
+          amount,
+        };
+      }
+
+      return {
+        nameSegment: descriptor,
+        transactionId: "",
+        amount,
+      };
+    }
+  }
+
+  const mergedNumericToken = lineRemainder.match(
+    /^(.+?)\s+(\d{9,18}\.\d{2})(?:\s+.*)?$/,
+  );
+  if (mergedNumericToken) {
+    const descriptor = mergedNumericToken[1].trim();
+    const token = mergedNumericToken[2];
+    const [integerPart, decimalPart] = token.split(".");
+
+    const candidates: Array<{ transactionId: string; amount: string; score: number }> = [];
+    const idLengthPriority = [11, 10, 12, 9, 13, 14, 8];
+
+    for (let amountDigits = 1; amountDigits <= 4; amountDigits += 1) {
+      if (integerPart.length - amountDigits < 8) {
+        continue;
+      }
+
+      const transactionId = integerPart.slice(0, -amountDigits);
+      const amountInteger = integerPart.slice(-amountDigits);
+      const amount = `${amountInteger}.${decimalPart}`;
+      const amountValue = Number(amount);
+      if (!Number.isFinite(amountValue) || amountValue <= 0 || amountValue > 10000) {
+        continue;
+      }
+
+      const idLen = transactionId.length;
+      const idRank = idLengthPriority.indexOf(idLen);
+      const amountRank = amountDigits === 1 ? 3 : amountDigits === 2 ? 2 : amountDigits === 3 ? 1 : 0;
+      const score = (idRank === -1 ? -100 : 100 - idRank * 10) + amountRank;
+      candidates.push({ transactionId, amount, score });
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    const best = candidates[0];
+    if (best) {
+      return {
+        nameSegment: descriptor,
+        transactionId: best.transactionId,
+        amount: best.amount,
+      };
+    }
+  }
+
   const strictSplit = lineRemainder.match(
-    /^(.+?)\s+([A-Za-z0-9]+)\s+(\$?\d{1,4}(?:,\d{3})*\.\d{2})$/,
+    /^(.+?)\s+([A-Za-z0-9]{6,})\s+(\$?\d{1,4}(?:,\d{3})*\.\d{2})(?:\s+.*)?$/,
   );
   if (strictSplit) {
     return {
@@ -44,7 +128,7 @@ function parseTail(lineRemainder: string):
   }
 
   const mergedAlphaId = lineRemainder.match(
-    /^(.+?)\s+([A-Za-z0-9]*[A-Za-z][A-Za-z0-9]*)(?:\$)?([1-9]\d{0,3}\.\d{2})$/,
+    /^(.+?)\s+([A-Za-z0-9]*[A-Za-z][A-Za-z0-9]{5,})(?:\$)?([1-9]\d{0,3}\.\d{2})(?:\s+.*)?$/,
   );
   if (mergedAlphaId) {
     return {
@@ -55,7 +139,7 @@ function parseTail(lineRemainder: string):
   }
 
   const mergedNumericId = lineRemainder.match(
-    /^(.+?)\s+(\d{8,14})(?:\$)?([1-9]\d{1,3}\.\d{2})$/,
+    /^(.+?)\s+(\d{8,14})(?:\$)?(\d{1,4}\.\d{2})(?:\s+.*)?$/,
   );
   if (mergedNumericId) {
     return {
