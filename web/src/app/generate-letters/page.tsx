@@ -1,5 +1,7 @@
-import { redirect } from "next/navigation";
+"use client";
+
+import Home from "../page";
 
 export default function GenerateLettersPage() {
-  redirect("/?panel=2");
+  return <Home forcedMode="generateLettersWorkflow" />;
 }

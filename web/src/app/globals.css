@@ -295,6 +295,38 @@ body {
   padding: 0.3rem 0.75rem;
   font-size: 0.85rem;
   font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  line-height: 1.2;
+}
+
+.signed-status-pill {
+  padding: 0.5rem 1rem;
+}
+
+.tool-open-btn {
+  margin-top: 0.35rem;
+  min-width: 138px;
+  border-radius: 0.72rem;
+  padding: 0.62rem 0.9rem;
+  background: linear-gradient(145deg, #a24533 0%, #8d3425 100%);
+  box-shadow: 0 8px 18px rgba(141, 52, 37, 0.24);
+  letter-spacing: 0.01em;
+  position: relative;
+}
+
+.tool-open-btn::after {
+  content: "\2192";
+  margin-left: 0.5rem;
+  font-size: 0.92rem;
+  opacity: 0.9;
+}
+
+.tool-open-btn:hover {
+  transform: translateY(-1px) scale(1.01);
+  box-shadow: 0 12px 24px rgba(141, 52, 37, 0.32);
 }
 
 .table-wrap {
@@ -382,6 +414,73 @@ thead th {
   cursor: not-allowed;
 }
 
+.letter-preview-wrap {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.letter-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.65rem;
+}
+
+.letter-preview-card {
+  border: 1px solid #ead9c8;
+  border-radius: 0.75rem;
+  background: #fffdf8;
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.letter-preview-card h4 {
+  margin: 0;
+  font-size: 0.98rem;
+}
+
+.letter-preview-card pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: var(--font-body);
+  font-size: 0.86rem;
+  color: #5f564b;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.docx-preview-body {
+  background: #fff;
+  border: 1px solid #eee2d6;
+  border-radius: 0.6rem;
+  padding: 0.8rem;
+  max-height: 260px;
+  overflow: auto;
+  color: #3f362e;
+}
+
+.docx-preview-body p {
+  margin: 0 0 0.6rem;
+  line-height: 1.35;
+}
+
+.docx-preview-body p:last-child {
+  margin-bottom: 0;
+}
+
+.workflow-step-box {
+  border: 1px solid #e8d8c7;
+  border-radius: 0.85rem;
+  padding: 0.85rem;
+  display: grid;
+  gap: 0.55rem;
+  background: #fffdf8;
+}
+
+.workflow-step-box.is-locked {
+  opacity: 0.72;
+}
+
 .landing-shell {
   position: relative;
   min-height: 100vh;
@@ -467,6 +566,14 @@ thead th {
   text-transform: uppercase;
   font-weight: 700;
   color: #8d3b2a;
+}
+
+.landing-hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
 }
 
 .landing-title {

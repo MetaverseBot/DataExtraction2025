@@ -1,5 +1,7 @@
-import { redirect } from "next/navigation";
+"use client";
+
+import Home from "../page";
 
 export default function ExtractPage() {
-  redirect("/?panel=0");
+  return <Home forcedMode="extractWorkflow" />;
 }

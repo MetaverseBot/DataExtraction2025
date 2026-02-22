@@ -11,14 +11,17 @@ function escapeCsvCell(value: string): string {
 export function donationsToCsv(
   records: DonationRecord[],
   defaultYear?: number,
+  includeEmail = true,
 ): string {
-  const header = ["Name", "Date", "Amount", "Payment Type", "Email"];
+  const header = includeEmail
+    ? ["Name", "Date", "Amount", "Payment Type", "Email"]
+    : ["Name", "Date", "Amount", "Payment Type"];
   const rows = records.map((record) => [
     record.name,
     normalizeDateForCsv(record.date, defaultYear),
     record.amount,
     record.paymentType,
-    record.email,
+    ...(includeEmail ? [record.email] : []),
   ]);
 
   return [header, ...rows]

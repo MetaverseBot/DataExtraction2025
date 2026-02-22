@@ -105,7 +105,7 @@ export function getThankYouLetterFileName(name: string): string {
 
 export function getThankYouLetterWordFileName(name: string): string {
   const safeName = name.replaceAll(/[^a-zA-Z0-9_-]/g, "_");
-  return `Thank_You_Letter_${safeName}.docx`;
+  return `Thank_You_Letter_${safeName}.doc`;
 }
 
 export async function getThankYouLetterBlob(

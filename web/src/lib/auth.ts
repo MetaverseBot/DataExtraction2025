@@ -1,25 +1,13 @@
-function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
+export const APP_AUTH_COOKIE = "aapasd_owner_session";
+
+const PASSWORD_FALLBACK = "dataextraction";
+const SESSION_SECRET_FALLBACK = "local-dev-session-secret-change-me";
+
+export function getPortalPassword(): string {
+  return process.env.OWNER_PORTAL_PASSWORD?.trim() || PASSWORD_FALLBACK;
 }
 
-export function getAllowedOwnerEmails(): string[] {
-  const raw = process.env.ALLOWED_OWNER_EMAILS ?? "";
-  return raw
-    .split(",")
-    .map((item) => normalizeEmail(item))
-    .filter((item) => item.length > 0);
-}
-
-export function isAllowedOwnerEmail(email: string | null | undefined): boolean {
-  if (!email) {
-    return false;
-  }
-
-  const normalized = normalizeEmail(email);
-  const allowlist = getAllowedOwnerEmails();
-  if (allowlist.length === 0) {
-    return false;
-  }
-
-  return allowlist.includes(normalized);
+export function getSessionSignature(): string {
+  const secret = process.env.AUTH_SESSION_SECRET?.trim() || SESSION_SECRET_FALLBACK;
+  return `aapasd-owner:${secret}`;
 }

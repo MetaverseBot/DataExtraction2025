@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Cormorant_Garamond, Manrope } from "next/font/google";
+import { SpeedInsights } from "@vercel/speed-insights/next";
 import "./globals.css";
 
 const headingFont = Cormorant_Garamond({
@@ -28,6 +29,7 @@ export default function RootLayout({
     <html lang="en">
       <body className={`${headingFont.variable} ${bodyFont.variable} antialiased`}>
         {children}
+        <SpeedInsights />
       </body>
     </html>
   );

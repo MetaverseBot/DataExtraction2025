@@ -19,15 +19,12 @@ import {
   renderDocxTemplate,
 } from "@/lib/docxTemplate";
 import {
-  applyDonorEmails,
   mergeCampData,
   donationsToCsv,
   parseCsvRowsGeneric,
   parseCampDirectoryFile,
   parseCampPaymentsCsv,
   type CampPaymentRow,
-  parseDonationsCsv,
-  parseDonorDatabaseFile,
 } from "@/lib/spreadsheet";
 import { DonationRecord } from "@/lib/types";
 
@@ -94,6 +91,60 @@ function isValidDonorEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
 
+function getCsvRowValue(row: Record<string, string>, aliases: string[]): string {
+  const entries = Object.entries(row).map(([key, value]) => ({
+    normalized: normalizeTemplateKey(key),
+    value,
+  }));
+
+  for (const alias of aliases) {
+    const normalizedAlias = normalizeTemplateKey(alias);
+    const found = entries.find((entry) => entry.normalized === normalizedAlias);
+    if (found && found.value.trim().length > 0) {
+      return found.value;
+    }
+  }
+
+  return "";
+}
+
+function getMatchAliasesFromHeader(header: string): string[] {
+  const normalized = normalizeTemplateKey(header);
+  const aliases = [header];
+
+  if (
+    normalized.includes("name") ||
+    normalized.includes("parent") ||
+    normalized.includes("guardian") ||
+    normalized.includes("donor")
+  ) {
+    aliases.push("Name", "Donor Name", "Parent Name", "Parent/Guardian Name");
+  }
+
+  if (normalized.includes("date")) {
+    aliases.push("Date", "Payment Date", "Contribution Date");
+  }
+
+  if (normalized.includes("email")) {
+    aliases.push("Email", "\\email", "email address", "e-mail");
+  }
+
+  return Array.from(new Set(aliases));
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function normalizeMatchValue(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 function extractTemplateParameters(templateText: string): string[] {
   const found: string[] = [];
   const seen = new Set<string>();
@@ -134,17 +185,22 @@ function isTodaysDateToken(value: string): boolean {
 
 function buildTemplateReplacementsFromRow(
   row: Record<string, string>,
-  fallbackName: string,
-  donations: DonationRecord[],
-  year: number | undefined,
+  _fallbackName: string,
+  _donations: DonationRecord[],
+  _year: number | undefined,
   templateParameters: string[],
 ): Record<string, string> {
-  const replacements = buildDonorTemplateReplacements(
-    fallbackName,
-    donations,
-    year,
-    templateParameters,
-  );
+  const replacements: Record<string, string> = {};
+  const today = new Date().toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
+
+  replacements["Today's Date"] = today;
+  replacements["Today’s Date"] = today;
+  replacements["Todays Date"] = today;
+  replacements["Today Date"] = today;
 
   const normalizedEntries = Object.entries(row).map(([key, value]) => ({
     key,
@@ -152,20 +208,15 @@ function buildTemplateReplacementsFromRow(
     value,
   }));
 
-  for (const { key, value } of normalizedEntries) {
-    if (isTodaysDateToken(key)) {
-      continue;
-    }
-    replacements[key] = value;
-  }
-
   for (const token of templateParameters) {
     if (isTodaysDateToken(token)) {
+      replacements[token] = today;
       continue;
     }
+
     const tokenNorm = normalizeTemplateKey(token);
     const found = normalizedEntries.find((entry) => entry.norm === tokenNorm);
-    if (found) {
+    if (found && found.value.trim().length > 0) {
       replacements[token] = found.value;
     }
   }
@@ -210,7 +261,13 @@ async function readDonorTemplateText(file: File): Promise<string> {
   return readDocTemplateText(file, "Letter template");
 }
 
-export default function Home() {
+type HomeProps = {
+  forcedMode?: "extractWorkflow" | "generateLettersWorkflow";
+};
+
+export default function Home({ forcedMode }: HomeProps = {}) {
+  const isExtractWorkflowMode = forcedMode === "extractWorkflow";
+  const isGenerateLettersWorkflowMode = forcedMode === "generateLettersWorkflow";
   const [files, setFiles] = useState<File[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -227,12 +284,18 @@ export default function Home() {
   const [campSendEmailConfirm, setCampSendEmailConfirm] = useState(true);
   const [isGeneratingCampLetters, setIsGeneratingCampLetters] = useState(false);
   const [currentPanel, setCurrentPanel] = useState(0);
-  const [showLanding, setShowLanding] = useState(true);
+  const [showLanding, setShowLanding] = useState(
+    !(isExtractWorkflowMode || isGenerateLettersWorkflowMode),
+  );
+  const [isSignedIn, setIsSignedIn] = useState(false);
   const pdfInputRef = useRef<HTMLInputElement | null>(null);
   const touchStartXRef = useRef<number | null>(null);
   const touchStartYRef = useRef<number | null>(null);
   const [step2Spreadsheet, setStep2Spreadsheet] = useState<File | null>(null);
+  const [step2TemplateParamsSpreadsheet, setStep2TemplateParamsSpreadsheet] = useState<File | null>(null);
   const [step2UploadedRecords, setStep2UploadedRecords] = useState<DonationRecord[]>([]);
+  const [step2DefaultRows, setStep2DefaultRows] = useState<Record<string, string>[]>([]);
+  const [step2TemplateParamRows, setStep2TemplateParamRows] = useState<Record<string, string>[]>([]);
   const [step2UploadedRows, setStep2UploadedRows] = useState<Record<string, string>[]>([]);
   const [letterTemplateFile, setLetterTemplateFile] = useState<File | null>(null);
   const [letterTemplateText, setLetterTemplateText] = useState<string>("");
@@ -240,13 +303,12 @@ export default function Home() {
     null,
   );
   const [templateParameters, setTemplateParameters] = useState<string[]>([]);
-  const [donorDatabaseFile, setDonorDatabaseFile] = useState<File | null>(null);
-  const [donorEmailMap, setDonorEmailMap] = useState<Map<string, string>>(new Map());
   const [step2SpreadsheetSource, setStep2SpreadsheetSource] = useState<
     "upload" | "current"
   >("current");
   const [step2YearOverride, setStep2YearOverride] = useState<string>("");
   const [letterFormat, setLetterFormat] = useState<LetterFormat>("word");
+  const [sendingEmailDonor, setSendingEmailDonor] = useState<string | null>(null);
   const [donationsViewMode, setDonationsViewMode] =
     useState<DonationsViewMode>("individual");
   const [groupIndividualByPerson, setGroupIndividualByPerson] = useState(false);
@@ -256,6 +318,18 @@ export default function Home() {
   const [totalSortKey, setTotalSortKey] = useState<TotalSortKey>("name");
 
   useEffect(() => {
+    if (isExtractWorkflowMode) {
+      setShowLanding(false);
+      setCurrentPanel(0);
+      return;
+    }
+
+    if (isGenerateLettersWorkflowMode) {
+      setShowLanding(false);
+      setCurrentPanel(2);
+      return;
+    }
+
     const params = new URLSearchParams(window.location.search);
     const panelParam = params.get("panel");
     if (panelParam === null) {
@@ -268,15 +342,66 @@ export default function Home() {
     if (Number.isInteger(panelValue) && panelValue >= 0 && panelValue <= 4) {
       setCurrentPanel(panelValue);
     }
+  }, [isExtractWorkflowMode, isGenerateLettersWorkflowMode]);
+
+  useEffect(() => {
+    if (isGenerateLettersWorkflowMode) {
+      setLetterFormat("word");
+    }
+  }, [isGenerateLettersWorkflowMode]);
+
+  function isPanelVisible(panelIndex: number): boolean {
+    if (isExtractWorkflowMode) {
+      return panelIndex === 0 || panelIndex === 1;
+    }
+    if (isGenerateLettersWorkflowMode) {
+      return panelIndex === 2;
+    }
+    return currentPanel === panelIndex;
+  }
+
+  useEffect(() => {
+    void (async () => {
+      const response = await fetch("/api/auth/session", { cache: "no-store" });
+      if (!response.ok) {
+        return;
+      }
+      const data = (await response.json()) as { authenticated?: boolean };
+      setIsSignedIn(Boolean(data.authenticated));
+    })();
   }, []);
 
   const enrichedActiveDonations = useMemo(() => {
-    return applyDonorEmails(activeBatch?.donations ?? [], donorEmailMap);
-  }, [activeBatch, donorEmailMap]);
+    return activeBatch?.donations ?? [];
+  }, [activeBatch]);
 
   const enrichedUploadedRecords = useMemo(() => {
-    return applyDonorEmails(step2UploadedRecords, donorEmailMap);
-  }, [step2UploadedRecords, donorEmailMap]);
+    if (step2UploadedRows.length > 0) {
+      return step2UploadedRows
+        .map((row) => {
+          const name = getCsvRowValue(row, [
+            "Name",
+            "Donor Name",
+            "Parent Name",
+            "Parent/Guardian Name",
+          ]);
+          const date = getCsvRowValue(row, ["Date", "Contribution Date", "Payment Date"]);
+          const amount = getCsvRowValue(row, ["Amount"]);
+          const paymentType = getCsvRowValue(row, ["Payment Type", "Payment", "Type"]);
+          const email =
+            getCsvRowValue(row, ["Email", "\\email", "e-mail", "email address"]) || "N/A";
+
+          if (!name || !date || !amount || !paymentType) {
+            return null;
+          }
+
+          return { name, date, amount, paymentType, email } as DonationRecord;
+        })
+        .filter((row): row is DonationRecord => Boolean(row));
+    }
+
+    return step2UploadedRecords;
+  }, [step2UploadedRecords, step2UploadedRows]);
 
   const recordsForLetterGeneration = useMemo(() => {
     if (step2SpreadsheetSource === "upload") {
@@ -407,6 +532,18 @@ export default function Home() {
     return groupedByDonor.length > 0;
   }, [groupedByDonor.length, step2SpreadsheetSource, step2UploadedRows.length]);
 
+  const isTemplateStepComplete = letterTemplateText.trim().length > 0;
+  const isDataStepComplete =
+    step2SpreadsheetSource === "upload"
+      ? step2UploadedRows.length > 0
+      : groupedByDonor.length > 0;
+
+  const hasStep2RowCountMismatch =
+    step2SpreadsheetSource === "upload" &&
+    step2TemplateParamRows.length > 0 &&
+    step2UploadedRecords.length > 0 &&
+    step2TemplateParamRows.length !== step2UploadedRecords.length;
+
   const visibleTemplateParameters = useMemo(
     () => templateParameters.filter((param) => !isTodaysDateToken(param)),
     [templateParameters],
@@ -419,6 +556,73 @@ export default function Home() {
       setStep2SpreadsheetSource("upload");
     }
   }, [activeBatch]);
+
+  useEffect(() => {
+    if (step2SpreadsheetSource !== "upload") {
+      return;
+    }
+
+    if (step2UploadedRecords.length === 0) {
+      setStep2UploadedRows([]);
+      return;
+    }
+
+    const specialMatchHeader = Object.keys(step2TemplateParamRows[0] ?? {})[0] ?? "";
+    const matchAliases = getMatchAliasesFromHeader(specialMatchHeader);
+    const specialRowsByMatchValue = new Map<string, Record<string, string>[]>();
+
+    if (specialMatchHeader) {
+      for (const row of step2TemplateParamRows) {
+        const rowMatchValue = getCsvRowValue(row, matchAliases);
+        const normalized = normalizeMatchValue(rowMatchValue);
+        if (!normalized) {
+          continue;
+        }
+        const existing = specialRowsByMatchValue.get(normalized) ?? [];
+        existing.push(row);
+        specialRowsByMatchValue.set(normalized, existing);
+      }
+    }
+
+    const mergedRows = step2UploadedRecords.map((record, index) => {
+      const defaultRow = step2DefaultRows[index] ?? {};
+
+      let extraParams: Record<string, string> = {};
+      if (specialMatchHeader) {
+        const defaultMatchValue = getCsvRowValue(defaultRow, matchAliases);
+        const normalizedDefaultMatch = normalizeMatchValue(defaultMatchValue);
+        const queue = specialRowsByMatchValue.get(normalizedDefaultMatch);
+        if (queue && queue.length > 0) {
+          extraParams = queue.shift() ?? {};
+        }
+      } else {
+        extraParams = step2TemplateParamRows[index] ?? {};
+      }
+
+      const extraEmail = getCsvRowValue(extraParams, [
+        "Email",
+        "\\email",
+        "email address",
+        "e-mail",
+      ]);
+      const finalEmail = isValidDonorEmail(record.email)
+        ? record.email
+        : isValidDonorEmail(extraEmail)
+          ? extraEmail
+          : record.email;
+
+      return {
+        ...extraParams,
+        Name: record.name,
+        Date: record.date,
+        Amount: record.amount,
+        "Payment Type": record.paymentType,
+        Email: finalEmail,
+      };
+    });
+
+    setStep2UploadedRows(mergedRows);
+  }, [step2DefaultRows, step2SpreadsheetSource, step2UploadedRecords, step2TemplateParamRows]);
 
   const loadBatchDetails = useCallback(async (batchId: string) => {
     setError(null);
@@ -505,7 +709,7 @@ export default function Home() {
       return;
     }
 
-    const csv = donationsToCsv(enrichedActiveDonations, statementYear);
+    const csv = donationsToCsv(enrichedActiveDonations, statementYear, !isExtractWorkflowMode);
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -684,10 +888,13 @@ export default function Home() {
     }
   }
 
-  async function handleStep2CsvFileChange(file: File | null) {
+  async function handleStep2DefaultCsvFileChange(file: File | null) {
     setStep2Spreadsheet(file);
     setStep2SpreadsheetSource("upload");
     if (!file) {
+      setStep2TemplateParamsSpreadsheet(null);
+      setStep2TemplateParamRows([]);
+      setStep2DefaultRows([]);
       setStep2UploadedRecords([]);
       setStep2UploadedRows([]);
       return;
@@ -696,34 +903,45 @@ export default function Home() {
     try {
       const text = await file.text();
       const genericRows = parseCsvRowsGeneric(text);
-      setStep2UploadedRows(genericRows);
+      const parsedRows = genericRows
+        .map((row) => {
+          const name = getCsvRowValue(row, [
+            "Name",
+            "Donor Name",
+            "Parent Name",
+            "Parent/Guardian Name",
+          ]);
+          const date = getCsvRowValue(row, ["Date", "Contribution Date", "Payment Date"]);
+          const amount = getCsvRowValue(row, ["Amount"]);
+          const paymentType = getCsvRowValue(row, ["Payment Type", "Payment", "Type"]);
+          const email =
+            getCsvRowValue(row, ["Email", "\\email", "e-mail", "email address"]) || "N/A";
 
-      if (letterTemplateFile) {
-        const bestEffortRecords: DonationRecord[] = genericRows
-          .map((row) => {
-            const name =
-              row["Name"] || row["Donor Name"] || row["Parent Name"] || row["Parent/Guardian Name"] || "";
-            const date = row["Date"] || row["Contribution Date"] || row["Payment Date"] || "";
-            const amount = row["Amount"] || "";
-            const paymentType = row["Payment Type"] || "";
-            const email = row["Email"] || "N/A";
+          if (!name || !date || !amount || !paymentType) {
+            return null;
+          }
 
-            if (!name || !date || !amount) {
-              return null;
-            }
+          return {
+            record: { name, date, amount, paymentType, email } as DonationRecord,
+            row,
+          };
+        })
+        .filter((row): row is { record: DonationRecord; row: Record<string, string> } => Boolean(row));
 
-            return { name, date, amount, paymentType, email } as DonationRecord;
-          })
-          .filter((row): row is DonationRecord => Boolean(row));
+      const records = parsedRows.map((row) => row.record);
 
-        setStep2UploadedRecords(bestEffortRecords);
-      } else {
-        const records = parseDonationsCsv(text);
-        setStep2UploadedRecords(records);
+      if (records.length === 0) {
+        throw new Error(
+          "Default CSV must include rows with Name, Date, Amount, and Payment Type.",
+        );
       }
+
+      setStep2DefaultRows(parsedRows.map((row) => row.row));
+      setStep2UploadedRecords(records);
 
       setError(null);
     } catch (csvError) {
+      setStep2DefaultRows([]);
       setStep2UploadedRecords([]);
       setStep2UploadedRows([]);
       const message =
@@ -734,23 +952,25 @@ export default function Home() {
     }
   }
 
-  async function handleDonorDatabaseFileChange(file: File | null) {
-    setDonorDatabaseFile(file);
+  async function handleStep2TemplateParamsCsvFileChange(file: File | null) {
+    setStep2TemplateParamsSpreadsheet(file);
+    setStep2SpreadsheetSource("upload");
     if (!file) {
-      setDonorEmailMap(new Map());
+      setStep2TemplateParamRows([]);
       return;
     }
 
     try {
-      const parsedMap = await parseDonorDatabaseFile(file);
-      setDonorEmailMap(parsedMap);
+      const text = await file.text();
+      const genericRows = parseCsvRowsGeneric(text);
+      setStep2TemplateParamRows(genericRows);
       setError(null);
-    } catch (dbError) {
-      setDonorEmailMap(new Map());
+    } catch (csvError) {
+      setStep2TemplateParamRows([]);
       const message =
-        dbError instanceof Error
-          ? dbError.message
-          : "Could not parse donor database file.";
+        csvError instanceof Error
+          ? csvError.message
+          : "Could not parse template-parameter CSV.";
       setError(message);
     }
   }
@@ -787,7 +1007,38 @@ export default function Home() {
     }
   }
 
-  function handleSendEmailToDonor(donorName: string, donations: DonationRecord[]) {
+  function getTemplateReplacementsForDonor(
+    donorName: string,
+    donations: DonationRecord[],
+  ): Record<string, string> {
+    if (step2SpreadsheetSource === "upload" && step2UploadedRows.length > 0) {
+      const normalizedDonorName = normalizeTemplateKey(donorName);
+      const matchingRow = step2UploadedRows.find((row) =>
+        normalizeTemplateKey(
+          getCsvRowValue(row, ["Name", "Donor Name", "Parent Name", "Parent/Guardian Name"]),
+        ) === normalizedDonorName,
+      );
+
+      if (matchingRow) {
+        return buildTemplateReplacementsFromRow(
+          matchingRow,
+          donorName,
+          donations,
+          effectiveLetterYear,
+          templateParameters,
+        );
+      }
+    }
+
+    return buildDonorTemplateReplacements(
+      donorName,
+      donations,
+      effectiveLetterYear,
+      templateParameters,
+    );
+  }
+
+  async function handleSendEmailToDonor(donorName: string, donations: DonationRecord[]) {
     const validEmail = donations
       .map((row) => row.email)
       .find((email) => isValidDonorEmail(email));
@@ -796,13 +1047,64 @@ export default function Home() {
       return;
     }
 
-    const total = donations.reduce((sum, row) => sum + amountToNumber(row.amount), 0);
-    const subject = encodeURIComponent("AAPASD Thank You");
-    const body = encodeURIComponent(
-      `Dear ${donorName},\n\nThank you for your support of AAPASD.\nTotal recorded donations: $${total.toFixed(2)} across ${donations.length} contribution(s).\n\nBest regards,\nAAPASD Team`,
+    const confirmed = window.confirm(
+      `Send email with attached letter to ${donorName} (${validEmail})?`,
     );
+    if (!confirmed) {
+      return;
+    }
 
-    window.open(`mailto:${validEmail}?subject=${subject}&body=${body}`, "_blank");
+    try {
+      setSendingEmailDonor(donorName);
+      const total = donations.reduce((sum, row) => sum + amountToNumber(row.amount), 0);
+      const subject = "AAPASD Thank You Letter";
+      const bodyText = `Dear ${donorName},\n\nThank you for your support of AAPASD. Please see the attached thank-you letter document.\nTotal recorded donations: $${total.toFixed(2)} across ${donations.length} contribution(s).\n\nBest regards,\nAAPASD Team`;
+
+      let blob: Blob;
+      let fileName: string;
+      if (letterTemplateBuffer) {
+        const replacements = getTemplateReplacementsForDonor(donorName, donations);
+        blob = await renderDocxTemplate(letterTemplateBuffer, replacements);
+        fileName = getDocxLetterFileName(donorName);
+      } else if (letterFormat === "word") {
+        blob = await getThankYouLetterWordBlob(donorName, donations, {
+          templateText: letterTemplateText,
+          statementYear: effectiveLetterYear,
+        });
+        fileName = getThankYouLetterWordFileName(donorName);
+      } else {
+        blob = await getThankYouLetterBlob(donorName, donations, {
+          templateText: letterTemplateText,
+          statementYear: effectiveLetterYear,
+        });
+        fileName = getThankYouLetterFileName(donorName);
+      }
+
+      const response = await fetch("/api/email/send-letter", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          to: validEmail,
+          subject,
+          bodyText,
+          attachmentFileName: fileName,
+          attachmentBase64: arrayBufferToBase64(await blob.arrayBuffer()),
+        }),
+      });
+
+      if (!response.ok) {
+        const data = (await response.json()) as { error?: string };
+        throw new Error(data.error ?? "Failed to send email.");
+      }
+      setError(null);
+    } catch (sendError) {
+      const message = sendError instanceof Error ? sendError.message : "Failed to send email.";
+      setError(message);
+    } finally {
+      setSendingEmailDonor(null);
+    }
   }
 
   const panelTitles = [
@@ -865,34 +1167,39 @@ export default function Home() {
         </div>
 
         <section className="landing-hero card">
-          <p className="landing-kicker">AAPASD Donor Operations</p>
-          <h1 className="landing-title">From statements to donor-ready letters in one streamlined flow</h1>
+          <div className="landing-hero-top">
+            <p className="landing-kicker">AAPASD Internal Guide</p>
+            {isSignedIn ? <span className="pill">Signed in on this device</span> : null}
+          </div>
+          <h1 className="landing-title">How to use the donor workflow tools</h1>
           <p className="landing-copy">
-            Extract records from bank PDFs, validate spreadsheets, generate polished thank-you letters,
-            and run summer camp receipt workflows with less manual work.
+            Use this page as a quick operator guide. Start at Workflows, choose the tool you need,
+            and follow the sequence below for normal monthly processing.
           </p>
           <div className="landing-actions">
-            <Link className="cta-btn" href="/login?next=/?panel=0">
-              Start Extraction
+            <Link className="cta-btn" href={isSignedIn ? "/workflows" : "/login?next=/workflows"}>
+              Open Workflow Selector
             </Link>
-            <Link className="secondary-btn" href="/home">
-              Open Workspace Pages
-            </Link>
+            {!isSignedIn ? (
+              <Link className="secondary-btn" href="/login?next=/workflows">
+                Sign In
+              </Link>
+            ) : null}
           </div>
         </section>
 
         <section className="landing-feature-grid">
           <article className="landing-feature-card">
-            <h2>Extraction</h2>
-            <p>Upload one or many statement PDFs and capture normalized donation rows with source tracking.</p>
+            <h2>How To Navigate</h2>
+            <p>Sign in, open Workflows, then move through each tool page in order as needed.</p>
           </article>
           <article className="landing-feature-card">
-            <h2>Letters</h2>
-            <p>Generate personalized PDF/Word/DOCX letters from templates and spreadsheet-driven parameters.</p>
+            <h2>Step Guidance Lives In Tools</h2>
+            <p>Each tool page now includes a focused checklist for that step, instead of one long list here.</p>
           </article>
           <article className="landing-feature-card">
-            <h2>Camp Workflow</h2>
-            <p>Merge camp payments and directory data, then create receipts and optional email drafts quickly.</p>
+            <h2>Operator Note</h2>
+            <p>Always logout on shared devices. Keep template tokens and CSV headers consistent each month.</p>
           </article>
         </section>
       </main>
@@ -902,6 +1209,7 @@ export default function Home() {
   return (
     <main className="page-shell">
       <>
+      {!isExtractWorkflowMode && !isGenerateLettersWorkflowMode ? (
       <section className="panel-nav">
         <div className="panel-nav-head">
           <p className="hero-kicker">Workflow Panels</p>
@@ -928,9 +1236,34 @@ export default function Home() {
           </button>
         </div>
       </section>
+      ) : isExtractWorkflowMode ? (
+      <section className="panel-nav">
+        <div className="panel-nav-head">
+          <p className="hero-kicker">Data Extraction Workflow</p>
+          <p className="muted-text">Extract Data and preview spreadsheet</p>
+        </div>
+        <div className="panel-nav-actions">
+          <Link className="secondary-btn" href="/workflows">
+            Back to Workflows
+          </Link>
+        </div>
+      </section>
+      ) : (
+      <section className="panel-nav">
+        <div className="panel-nav-head">
+          <p className="hero-kicker">Generate Letters Workflow</p>
+          <p className="muted-text">Template -&gt; CSV -&gt; Generate DOCX + Send Emails</p>
+        </div>
+        <div className="panel-nav-actions">
+          <Link className="secondary-btn" href="/workflows">
+            Back to Workflows
+          </Link>
+        </div>
+      </section>
+      )}
 
       <div className="swipe-surface" onTouchStart={handleSwipeStart} onTouchEnd={handleSwipeEnd}>
-      <section className={`dashboard-grid records-panel step-card ${currentPanel === 0 ? "" : "is-hidden"}`}>
+      <section className={`dashboard-grid records-panel step-card ${isPanelVisible(0) ? "" : "is-hidden"}`}>
         <article className="card">
           <h2 className="card-title">Extract</h2>
           <form onSubmit={handleUpload} className="stack-sm">
@@ -1014,7 +1347,7 @@ export default function Home() {
         </article>
       </section>
 
-      <section className={`records-panel step-card ${currentPanel === 1 ? "" : "is-hidden"}`}>
+      <section className={`records-panel step-card ${isPanelVisible(1) ? "" : "is-hidden"}`}>
         <div className="panel-header">
           <h2 className="card-title">Spreadsheet Preview</h2>
           <div className="panel-actions">
@@ -1072,7 +1405,7 @@ export default function Home() {
                 <option value="date">Date</option>
                 <option value="amount">Amount</option>
                 <option value="paymentType">Payment Type</option>
-                <option value="email">Email</option>
+                {!isExtractWorkflowMode ? <option value="email">Email</option> : null}
               </select>
 
               <label className="checkbox-inline" htmlFor="group-individual-toggle">
@@ -1103,7 +1436,7 @@ export default function Home() {
                 <option value="name">Name</option>
                 <option value="totalAmount">Total Amount</option>
                 <option value="donationCount">Donation Count</option>
-                <option value="email">Email</option>
+                {!isExtractWorkflowMode ? <option value="email">Email</option> : null}
               </select>
             </>
           )}
@@ -1130,7 +1463,7 @@ export default function Home() {
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>Email</th>
+                  {!isExtractWorkflowMode ? <th>Email</th> : null}
                   <th>Donation Count</th>
                   <th>Total Amount</th>
                 </tr>
@@ -1139,7 +1472,7 @@ export default function Home() {
                 {sortedTotalRows.map((row) => (
                   <tr key={row.name}>
                     <td>{row.name}</td>
-                    <td>{row.email}</td>
+                    {!isExtractWorkflowMode ? <td>{row.email}</td> : null}
                     <td>{row.donationCount}</td>
                     <td>${row.totalAmount.toFixed(2)}</td>
                   </tr>
@@ -1154,7 +1487,7 @@ export default function Home() {
                   <th>Date</th>
                   <th>Amount</th>
                   <th>Payment Type</th>
-                  <th>Email</th>
+                  {!isExtractWorkflowMode ? <th>Email</th> : null}
                   <th>Source File</th>
                 </tr>
               </thead>
@@ -1162,7 +1495,7 @@ export default function Home() {
                 {groupIndividualByPerson
                   ? groupedIndividualDonations.flatMap(([donorName, rows]) => [
                       <tr key={`group-${donorName}`} className="group-row">
-                        <td colSpan={6}>
+                        <td colSpan={isExtractWorkflowMode ? 5 : 6}>
                           <strong>{donorName}</strong> - {rows.length} donation(s)
                         </td>
                       </tr>,
@@ -1172,7 +1505,7 @@ export default function Home() {
                           <td>{record.date}</td>
                           <td>{record.amount}</td>
                           <td>{record.paymentType}</td>
-                          <td>{record.email}</td>
+                          {!isExtractWorkflowMode ? <td>{record.email}</td> : null}
                           <td>{record.sourceFileName ?? "N/A"}</td>
                         </tr>
                       )),
@@ -1183,7 +1516,7 @@ export default function Home() {
                         <td>{record.date}</td>
                         <td>{record.amount}</td>
                         <td>{record.paymentType}</td>
-                        <td>{record.email}</td>
+                        {!isExtractWorkflowMode ? <td>{record.email}</td> : null}
                         <td>{record.sourceFileName ?? "N/A"}</td>
                       </tr>
                     ))}
@@ -1193,161 +1526,272 @@ export default function Home() {
         </div>
       </section>
 
-      <section className={`records-panel step-card ${currentPanel === 2 ? "" : "is-hidden"}`}>
+      <section className={`records-panel step-card ${isPanelVisible(2) ? "" : "is-hidden"}`}>
         <div className="panel-header">
           <h2 className="card-title">Generate Letters</h2>
         </div>
         <form className="stack-sm">
-          <label className="input-label" htmlFor="letter-template-file">
-            Letter Template (upload this first)
-          </label>
-          <input
-            id="letter-template-file"
-            className="file-input"
-            type="file"
-            accept=".txt,.md,.docx,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            onChange={(event) => {
-              void handleLetterTemplateFileChange(event.currentTarget.files?.[0] ?? null);
-            }}
-          />
-          <p className="muted-text">
-            {letterTemplateFile
-              ? `Template loaded: ${letterTemplateFile.name}`
-              : "Upload a template first. Then the app detects required parameters from brackets."}
-          </p>
+          <div className="workflow-step-box">
+            <p className="hero-kicker">Step 1</p>
+            <h3 className="card-title">Upload Template</h3>
 
-          <label className="input-label" htmlFor="step2-spreadsheet-source">
-            Spreadsheet source
-          </label>
-          <select
-            id="step2-spreadsheet-source"
-            className="select-input"
-            value={step2SpreadsheetSource}
-            disabled={!letterTemplateFile}
-            onChange={(event) =>
-              setStep2SpreadsheetSource(
-                event.currentTarget.value as "upload" | "current",
-              )
-            }
-          >
-            <option value="upload">Upload CSV file</option>
-            <option value="current" disabled={!activeBatch}>
-              Use current spreadsheet preview
-            </option>
-          </select>
+            <label className="input-label" htmlFor="letter-template-file">
+              Upload template
+            </label>
+            <input
+              id="letter-template-file"
+              className="file-input"
+              type="file"
+              accept=".txt,.md,.docx,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              onChange={(event) => {
+                void handleLetterTemplateFileChange(event.currentTarget.files?.[0] ?? null);
+              }}
+            />
 
-          {step2SpreadsheetSource === "current" ? (
             <p className="muted-text">
-              Using the currently selected batch preview ({activeBatch?.donations.length ?? 0} rows).
+              {letterTemplateFile
+                ? `Template loaded: ${letterTemplateFile.name}`
+                : "Upload a template first."}
             </p>
-          ) : null}
+          </div>
 
-          {step2SpreadsheetSource === "upload" ? (
-            <>
-          <label className="input-label" htmlFor="step2-csv">
-            Contributions spreadsheet (CSV)
-          </label>
-          <input
-            id="step2-csv"
-            className="file-input"
-            type="file"
-            accept=".csv,text/csv"
-            disabled={!letterTemplateFile}
-            onChange={(event) => {
-              void handleStep2CsvFileChange(event.currentTarget.files?.[0] ?? null);
-            }}
-          />
-          <p className="muted-text">
-            {step2Spreadsheet
-              ? `Loaded ${
-                  letterTemplateFile ? step2UploadedRows.length : step2UploadedRecords.length
-                } rows from ${step2Spreadsheet.name}`
-              : "Upload a contributions CSV to generate donor letters from file."}
-          </p>
-          {visibleTemplateParameters.length > 0 ? (
+          <div className={`workflow-step-box ${!isTemplateStepComplete ? "is-locked" : ""}`}>
+            <p className="hero-kicker">Step 2</p>
+            <h3 className="card-title">Upload Data CSV with Template Parameters</h3>
+            {!isTemplateStepComplete ? (
+              <p className="warning-text">Complete Step 1 first to unlock this step.</p>
+            ) : null}
+
+            <label className="input-label" htmlFor="step2-spreadsheet-source">
+              Spreadsheet source
+            </label>
+            <select
+              id="step2-spreadsheet-source"
+              className="select-input"
+              value={step2SpreadsheetSource}
+              disabled={!isTemplateStepComplete}
+              onChange={(event) =>
+                setStep2SpreadsheetSource(event.currentTarget.value as "upload" | "current")
+              }
+            >
+              <option value="upload">Upload CSV file</option>
+              <option value="current" disabled={!activeBatch}>
+                Use current spreadsheet preview
+              </option>
+            </select>
+
+            {step2SpreadsheetSource === "current" ? (
+              <p className="muted-text">
+                Using the currently selected batch preview ({activeBatch?.donations.length ?? 0} rows).
+              </p>
+            ) : null}
+
+            {step2SpreadsheetSource === "upload" ? (
+              <>
+                <label className="input-label" htmlFor="step2-csv">
+                  Upload default CSV (Name, Date, Amount, Payment Type)
+                </label>
+                <input
+                  id="step2-csv"
+                  className="file-input"
+                  type="file"
+                  accept=".csv,text/csv"
+                  disabled={!isTemplateStepComplete}
+                  onChange={(event) => {
+                    void handleStep2DefaultCsvFileChange(event.currentTarget.files?.[0] ?? null);
+                  }}
+                />
+                <p className="muted-text">
+                  {step2Spreadsheet
+                    ? `Loaded ${step2UploadedRecords.length} default rows from ${step2Spreadsheet.name}`
+                    : "Upload a default CSV first."}
+                </p>
+
+                <label className="input-label" htmlFor="step2-template-params-csv">
+                  Upload template-parameter CSV (all non-default template fields)
+                </label>
+                <input
+                  id="step2-template-params-csv"
+                  className="file-input"
+                  type="file"
+                  accept=".csv,text/csv"
+                  disabled={!isTemplateStepComplete || !step2Spreadsheet}
+                  onChange={(event) => {
+                    void handleStep2TemplateParamsCsvFileChange(
+                      event.currentTarget.files?.[0] ?? null,
+                    );
+                  }}
+                />
+                <p className="muted-text">
+                  {step2TemplateParamsSpreadsheet
+                    ? `Loaded ${step2TemplateParamRows.length} parameter rows from ${step2TemplateParamsSpreadsheet.name}`
+                    : "Optional but recommended: upload parameter CSV to fill template-specific fields."}
+                </p>
+                <p className="muted-text">
+                  Matching rule: the first column in the parameter CSV is used as the key (for example,
+                  <code>Name</code>) and matched to the same column in the default CSV.
+                </p>
+                {hasStep2RowCountMismatch ? (
+                  <p className="warning-text">
+                    Warning: default CSV rows and parameter CSV rows count do not match. Matching uses the first column of the parameter CSV.
+                  </p>
+                ) : null}
+                {visibleTemplateParameters.length > 0 ? (
+                  <p className="muted-text">
+                    Template parameters: {visibleTemplateParameters
+                      .map((param) => `[${param}]`)
+                      .join(", ")}
+                  </p>
+                ) : null}
+                <p className="muted-text">
+                  CSV format: first row is column labels (no brackets), and each next row is one letter&apos;s data.
+                </p>
+              </>
+            ) : null}
+
             <p className="muted-text">
-              Template parameters: {visibleTemplateParameters
-                .map((param) => `[${param}]`)
-                .join(", ")}
+              Include an email column in your data CSV (supports <code>Email</code> or <code>\email</code>)
+              to enable one-click Gmail drafts for each donor.
             </p>
-          ) : null}
-          <p className="muted-text">
-            CSV format: first row is column labels (no brackets), and each next row is one letter&apos;s data.
-          </p>
-            </>
-          ) : null}
+          </div>
 
-          <label className="input-label" htmlFor="donor-db-file">
-            Donor Emails (CSV/Excel with names + emails)
-          </label>
-          <input
-            id="donor-db-file"
-            className="file-input"
-            type="file"
-            accept=".csv,.tsv,.txt,.xlsx,.xls"
-            disabled={!letterTemplateFile}
-            onChange={(event) => {
-              void handleDonorDatabaseFileChange(event.currentTarget.files?.[0] ?? null);
-            }}
-          />
-          <p className="muted-text">
-            {donorDatabaseFile
-              ? `Loaded ${donorEmailMap.size} donor email(s) from ${donorDatabaseFile.name}`
-              : "Optional: upload donor emails to replace N/A emails automatically."}
-          </p>
+          <div className={`workflow-step-box ${!isDataStepComplete ? "is-locked" : ""}`}>
+            <p className="hero-kicker">Step 3</p>
+            <h3 className="card-title">Generate DOCX and Preview on Website</h3>
+            {!isDataStepComplete ? (
+              <p className="warning-text">Complete Step 2 first to unlock generation.</p>
+            ) : null}
 
-          <label className="input-label" htmlFor="step2-year-override">
-            Donation year override (optional)
-          </label>
-          <input
-            id="step2-year-override"
-            className="file-input"
-            type="number"
-            min={2000}
-            max={2099}
-            disabled={!letterTemplateFile}
-            placeholder={statementYear ? `Detected: ${statementYear}` : "Detected automatically"}
-            value={step2YearOverride}
-            onChange={(event) =>
-              setStep2YearOverride(event.currentTarget.value)
-            }
-          />
+            <label className="input-label" htmlFor="step2-year-override">
+              Donation year override (optional)
+            </label>
+            <input
+              id="step2-year-override"
+              className="file-input"
+              type="number"
+              min={2000}
+              max={2099}
+              disabled={!isDataStepComplete}
+              placeholder={statementYear ? `Detected: ${statementYear}` : "Detected automatically"}
+              value={step2YearOverride}
+              onChange={(event) => setStep2YearOverride(event.currentTarget.value)}
+            />
 
-          <p className="muted-text">
-            If left blank, year is auto-detected from selected statement batch or spreadsheet rows.
-          </p>
-          <label className="input-label" htmlFor="step2-letter-format">
-            Letter format
-          </label>
-          <select
-            id="step2-letter-format"
-            className="select-input"
-            value={letterFormat}
-            disabled={!letterTemplateFile}
-            onChange={(event) =>
-              setLetterFormat(event.currentTarget.value as LetterFormat)
-            }
-          >
-            <option value="pdf">PDF (.pdf)</option>
-            <option value="word">Word (.doc)</option>
-          </select>
-          <p className="muted-text">
-            Current letter year for on-page donor downloads: {effectiveLetterYear ?? "Auto"}
-          </p>
-          <button
-            type="button"
-            className="cta-btn"
-            disabled={!letterTemplateFile || !canGenerateLetters || isDownloadingAll}
-            onClick={() => {
-              void handleDownloadAllLetters();
-            }}
-          >
-            {isDownloadingAll ? "Generating..." : "Generate"}
-          </button>
+            <p className="muted-text">
+              If left blank, year is auto-detected from selected statement batch or spreadsheet rows.
+            </p>
+            {!isGenerateLettersWorkflowMode ? (
+              <>
+                <label className="input-label" htmlFor="step2-letter-format">
+                  Letter format
+                </label>
+                <select
+                  id="step2-letter-format"
+                  className="select-input"
+                  value={letterFormat}
+                  disabled={!isDataStepComplete}
+                  onChange={(event) => setLetterFormat(event.currentTarget.value as LetterFormat)}
+                >
+                  <option value="pdf">PDF (.pdf)</option>
+                  <option value="word">Word (.docx)</option>
+                </select>
+              </>
+            ) : (
+              <p className="muted-text">Output format: DOCX (.docx)</p>
+            )}
+            <p className="muted-text">
+              Current letter year for on-page donor downloads: {effectiveLetterYear ?? "Auto"}
+            </p>
+            <button
+              type="button"
+              className="cta-btn"
+              disabled={!isTemplateStepComplete || !isDataStepComplete || !canGenerateLetters || isDownloadingAll}
+              onClick={() => {
+                void handleDownloadAllLetters();
+              }}
+            >
+              {isDownloadingAll ? "Generating..." : "Generate Documents (.docx)"}
+            </button>
+
+            {groupedByDonor.length > 0 ? (
+              <div className="donor-grid">
+                {groupedByDonor.map(([donorName, donations]) => {
+                  const total = donations.reduce((sum, row) => {
+                    const amount = Number(row.amount.replaceAll("$", "").replaceAll(",", ""));
+                    return Number.isFinite(amount) ? sum + amount : sum;
+                  }, 0);
+                  const donorEmail =
+                    donations.map((row) => row.email).find((email) => isValidDonorEmail(email)) ??
+                    "N/A";
+
+                  return (
+                    <article key={`letters-${donorName}`} className="donor-card">
+                      <h3>{donorName}</h3>
+                      <p>
+                        {donations.length} donation(s) - ${total.toFixed(2)} total
+                      </p>
+                      <p className="muted-text">Email: {donorEmail}</p>
+
+                      <button
+                        type="button"
+                        className="secondary-btn donor-btn donor-btn-download"
+                        onClick={async () => {
+                          if (letterTemplateBuffer) {
+                            const replacements = getTemplateReplacementsForDonor(
+                              donorName,
+                              donations,
+                            );
+                            const blob = await renderDocxTemplate(letterTemplateBuffer, replacements);
+                            const url = URL.createObjectURL(blob);
+                            const link = document.createElement("a");
+                            link.href = url;
+                            link.download = getDocxLetterFileName(donorName);
+                            link.click();
+                            URL.revokeObjectURL(url);
+                            return;
+                          }
+
+                          if (letterFormat === "word") {
+                            await downloadThankYouLetterWord(donorName, donations, {
+                              templateText: letterTemplateText,
+                              statementYear: effectiveLetterYear,
+                            });
+                          } else {
+                            await downloadThankYouLetter(donorName, donations, {
+                              templateText: letterTemplateText,
+                              statementYear: effectiveLetterYear,
+                            });
+                          }
+                        }}
+                      >
+                        Download Letter
+                      </button>
+
+                      <button
+                        type="button"
+                        className="secondary-btn donor-btn donor-btn-email"
+                        disabled={donorEmail === "N/A" || sendingEmailDonor === donorName}
+                        onClick={() => {
+                          void handleSendEmailToDonor(donorName, donations);
+                        }}
+                      >
+                        {donorEmail === "N/A"
+                          ? "Send Email (Disabled)"
+                          : sendingEmailDonor === donorName
+                            ? "Sending..."
+                            : "Send Email"}
+                      </button>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : null}
+
+          </div>
         </form>
       </section>
 
-      <section className={`records-panel step-card ${currentPanel === 3 ? "" : "is-hidden"}`}>
+      <section className={`records-panel step-card ${isPanelVisible(3) ? "" : "is-hidden"}`}>
         <div className="panel-header">
           <h2 className="card-title">Summer Camp Workflow</h2>
         </div>
@@ -1429,7 +1873,7 @@ export default function Home() {
         </form>
       </section>
 
-      <section className={`records-panel step-card ${currentPanel === 4 ? "" : "is-hidden"}`}>
+      <section className={`records-panel step-card ${isPanelVisible(4) ? "" : "is-hidden"}`}>
         <div className="panel-header">
           <h2 className="card-title">Letter Downloads</h2>
           <div className="panel-actions">
@@ -1464,21 +1908,25 @@ export default function Home() {
                 <button
                   type="button"
                   className="secondary-btn donor-btn donor-btn-email"
-                  disabled={donorEmail === "N/A"}
-                  onClick={() => handleSendEmailToDonor(donorName, donations)}
+                  disabled={donorEmail === "N/A" || sendingEmailDonor === donorName}
+                  onClick={() => {
+                    void handleSendEmailToDonor(donorName, donations);
+                  }}
                 >
-                  {donorEmail === "N/A" ? "No valid email" : "Send email"}
+                  {donorEmail === "N/A"
+                    ? "No valid email"
+                    : sendingEmailDonor === donorName
+                      ? "Sending..."
+                      : "Send email"}
                 </button>
                 <button
                   type="button"
                   className="secondary-btn donor-btn donor-btn-download"
                   onClick={async () => {
                     if (letterTemplateBuffer) {
-                      const replacements = buildDonorTemplateReplacements(
+                      const replacements = getTemplateReplacementsForDonor(
                         donorName,
                         donations,
-                        effectiveLetterYear,
-                        templateParameters,
                       );
                       const blob = await renderDocxTemplate(letterTemplateBuffer, replacements);
                       const url = URL.createObjectURL(blob);

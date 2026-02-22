@@ -10,6 +10,15 @@ function escapeXml(value: string): string {
     .replaceAll("'", "&apos;");
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildSplitTokenRegex(token: string): RegExp {
+  const parts = Array.from(token).map((char) => escapeRegex(char));
+  return new RegExp(parts.join("(?:<[^>]+>)*"), "g");
+}
+
 function normalizeDate(date: string, year?: number): string {
   const trimmed = date.trim();
   if (/20\d{2}/.test(trimmed)) {
@@ -65,6 +74,7 @@ export function buildDonorTemplateReplacements(
   const base: Record<string, string> = {
     Date: today,
     "Today's Date": today,
+    "Today’s Date": today,
     "Todays Date": today,
     "Today Date": today,
     "Parent/Guardian Name": donorName,
@@ -80,6 +90,11 @@ export function buildDonorTemplateReplacements(
     $$: `$${total.toFixed(2)}`,
   };
 
+  const normalizedBaseEntries = Object.entries(base).map(([key, value]) => ({
+    normalized: normalizeToken(key),
+    value,
+  }));
+
   for (const token of requestedTokens) {
     if (token in base) {
       continue;
@@ -91,23 +106,9 @@ export function buildDonorTemplateReplacements(
       continue;
     }
 
-    if (normalized.includes("date")) {
-      base[token] = firstDate;
-    } else if (normalized.includes("amount") || normalized === "$$") {
-      base[token] = `$${total.toFixed(2)}`;
-    } else if (normalized.includes("payment") && normalized.includes("type")) {
-      base[token] = firstPaymentType;
-    } else if (normalized.includes("count")) {
-      base[token] = String(donations.length);
-    } else if (
-      normalized.includes("name") ||
-      normalized.includes("parent") ||
-      normalized.includes("guardian") ||
-      normalized.includes("donor")
-    ) {
-      base[token] = donorName;
-    } else {
-      base[token] = "";
+    const matchedBase = normalizedBaseEntries.find((entry) => entry.normalized === normalized);
+    if (matchedBase) {
+      base[token] = matchedBase.value;
     }
   }
 
@@ -135,14 +136,8 @@ export async function renderDocxTemplate(
       const value = escapeXml(rawValue ?? "");
       updated = updated.split(token).join(value);
 
-      const normalizedKey = normalizeToken(key);
-      updated = updated.replace(/\[(?:[^\]]|<[^>]+>)*\]/g, (candidate) => {
-        const inner = candidate.slice(1, -1).replace(/<[^>]+>/g, "");
-        if (normalizeToken(inner) === normalizedKey) {
-          return value;
-        }
-        return candidate;
-      });
+      const splitTokenPattern = buildSplitTokenRegex(token);
+      updated = updated.replace(splitTokenPattern, value);
     }
 
     zip.file(xmlPath, updated);

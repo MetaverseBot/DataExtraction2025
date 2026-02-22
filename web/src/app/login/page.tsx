@@ -3,66 +3,65 @@
 import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { getSupabaseBrowser } from "@/lib/supabaseBrowser";
 
 function resolveNextPath(nextParam: string | null): string {
   if (!nextParam || !nextParam.startsWith("/") || nextParam.startsWith("//")) {
-    return "/home";
+    return "/workflows";
   }
   return nextParam;
 }
 
 export default function LoginPage() {
   const router = useRouter();
-  const [emailInput, setEmailInput] = useState("");
-  const [nextPath, setNextPath] = useState("/home");
+  const [passwordInput, setPasswordInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [nextPath, setNextPath] = useState("/workflows");
 
   useEffect(() => {
     const next = resolveNextPath(new URLSearchParams(window.location.search).get("next"));
     setNextPath(next);
 
-    const supabase = getSupabaseBrowser();
-    void supabase.auth.getUser().then(({ data }) => {
-      if (data.user) {
+    void (async () => {
+      const response = await fetch("/api/auth/session", { cache: "no-store" });
+      if (!response.ok) {
+        return;
+      }
+      const data = (await response.json()) as { authenticated?: boolean };
+      if (data.authenticated) {
+        setStatusMessage("Already signed in on this device. Redirecting...");
         router.replace(next);
       }
-    });
+    })();
   }, [router]);
 
-  async function handleEmailLogin(event: FormEvent<HTMLFormElement>) {
+  async function handlePasswordLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
     setStatusMessage(null);
-
-    const email = emailInput.trim().toLowerCase();
-    if (!email) {
-      setError("Enter your email address.");
+    if (!passwordInput.trim()) {
+      setError("Enter password.");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const supabase = getSupabaseBrowser();
-      const redirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent(nextPath)}`;
-      const { error: signInError } = await supabase.auth.signInWithOtp({
-        email,
-        options: {
-          emailRedirectTo: redirectTo,
-          shouldCreateUser: false,
-        },
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: passwordInput }),
       });
 
-      if (signInError) {
-        throw signInError;
+      if (!response.ok) {
+        const data = (await response.json()) as { error?: string };
+        throw new Error(data.error || "Login failed.");
       }
 
-      setStatusMessage("Check your email for a secure sign-in link.");
+      setStatusMessage("Signed in on this device.");
+      router.replace(nextPath);
     } catch (loginError) {
-      const message =
-        loginError instanceof Error ? loginError.message : "Failed to send sign-in email.";
+      const message = loginError instanceof Error ? loginError.message : "Login failed.";
       setError(message);
     } finally {
       setIsSubmitting(false);
@@ -76,34 +75,33 @@ export default function LoginPage() {
           <p className="hero-kicker">AAPASD Operations</p>
           <h1 className="login-title">Owner-Only Access Portal</h1>
           <p className="muted-text">
-            Sign in with your approved owner email to access donation extraction, spreadsheets, and
-            letter workflows.
+            Enter the private owner password to access donation extraction, spreadsheets, and letter
+            workflows.
           </p>
           <ul className="login-feature-list">
-            <li>Email-based secure login (no shared password)</li>
-            <li>Allowlisted owner accounts only</li>
-            <li>Server-validated sessions on every protected route</li>
+            <li>Private owner-only workspace access</li>
+            <li>Server-validated secure session cookie</li>
+            <li>Protected routes across the entire portal</li>
           </ul>
         </aside>
 
         <div className="login-form-panel">
           <h2 className="card-title">Sign In</h2>
-          <p className="muted-text">Use your approved email address to receive a one-time magic link.</p>
-          <form className="stack-sm" onSubmit={handleEmailLogin}>
-            <label className="input-label" htmlFor="owner-email">
-              Owner Email
+          <p className="muted-text">Use the shared owner password.</p>
+          <form className="stack-sm" onSubmit={handlePasswordLogin}>
+            <label className="input-label" htmlFor="owner-password">
+              Password
             </label>
             <input
-              id="owner-email"
+              id="owner-password"
               className="file-input"
-              type="email"
-              value={emailInput}
-              onChange={(event) => setEmailInput(event.currentTarget.value)}
-              autoComplete="email"
+              type="password"
+              value={passwordInput}
+              onChange={(event) => setPasswordInput(event.currentTarget.value)}
               autoFocus
             />
             <button type="submit" className="cta-btn" disabled={isSubmitting}>
-              {isSubmitting ? "Sending link..." : "Send Magic Link"}
+              {isSubmitting ? "Signing in..." : "Login"}
             </button>
             <Link className="secondary-btn" href="/">
               Back to Homepage
