@@ -1,63 +1,49 @@
-# Donation Desk (Next.js + Convex)
+# Donation Desk (Next.js + Supabase)
 
-This app replaces the old CLI flow with a browser-based workflow:
+This app provides an internal browser workflow for AAPASD:
 
-- Upload one or more donor statement PDFs
-- Extract donation records from lines containing `Payment From`
-- Store parsed records in Convex
-- Step 1 output: download a contributions spreadsheet (`.csv`)
-- Step 2 input: upload/use spreadsheet and optionally set donation year
-- Step 2 output: all donor letters in one ZIP
-- Summer camp workflow: statement -> payment sheet -> camp-data merge -> camp receipts + email drafts
+- Extract donation records from bank statement PDFs
+- Review data in spreadsheet preview
+- Generate letters from templates and spreadsheet uploads
+- Send emails with generated letter attachments
+- Run summer camp merge + receipt workflow
 
 ## Tech Stack
 
 - Next.js (App Router)
-- Convex (database + backend functions)
+- Supabase (database)
 - PDF parsing with `pdf-parse`
-- PDF letter generation with `jspdf`
+- PDF generation with `jspdf`
+- DOCX template rendering with `jszip`
 
-## 1) Install
+## Setup
+
+Install dependencies:
 
 ```bash
 npm install
 ```
 
-## 2) Configure Convex
-
-Run Convex setup from this `web` folder:
+Create `web/.env.local` with required values:
 
 ```bash
-npx convex dev
+SUPABASE_URL=...
+NEXT_PUBLIC_SUPABASE_URL=...
+SUPABASE_SERVICE_ROLE_KEY=...
+OWNER_PORTAL_PASSWORD=...
+AUTH_SESSION_SECRET=...
+
+# Optional automated Gmail sending
+GMAIL_USER=...
+GMAIL_CLIENT_ID=...
+GMAIL_CLIENT_SECRET=...
+GMAIL_REFRESH_TOKEN=...
 ```
 
-When prompted, complete login/project selection. Convex will generate the `_generated` folder under `convex/`.
-
-Create `web/.env.local` with your deployment URL:
-
-```bash
-NEXT_PUBLIC_CONVEX_URL=https://your-deployment.convex.cloud
-```
-
-## 3) Run the app
+Run locally:
 
 ```bash
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
-
-## Access Password
-
-The app is protected by a password gate.
-
-- Password: `aapasddonors`
-
-## Convex Functions
-
-- `convex/donations.js`
-  - `saveBatch`
-  - `getRecentBatches`
-  - `getBatchById`
-
-Schema is defined in `convex/schema.js`.
+Open `http://localhost:3000`.

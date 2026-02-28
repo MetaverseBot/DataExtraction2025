@@ -5,23 +5,18 @@ import JSZip from "jszip";
 import { Download } from "lucide-react";
 import Link from "next/link";
 import {
-  downloadThankYouLetter,
-  downloadThankYouLetterWord,
   getCampReceiptLetterBlob,
   getThankYouLetterBlob,
-  getThankYouLetterFileName,
   getThankYouLetterWordBlob,
-  getThankYouLetterWordFileName,
 } from "@/lib/letterPdf";
 import {
   buildDonorTemplateReplacements,
-  getDocxLetterFileName,
   renderDocxTemplate,
 } from "@/lib/docxTemplate";
 import {
   mergeCampData,
   donationsToCsv,
-  parseCsvRowsGeneric,
+  parseSpreadsheetRowsGeneric,
   parseCampDirectoryFile,
   parseCampPaymentsCsv,
   type CampPaymentRow,
@@ -141,8 +136,72 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+async function convertDocxBlobToPdfBlob(docxBlob: Blob, fileName: string): Promise<Blob> {
+  const response = await fetch("/api/convert/docx-to-pdf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fileName,
+      docxBase64: arrayBufferToBase64(await docxBlob.arrayBuffer()),
+    }),
+  });
+
+  if (!response.ok) {
+    const data = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? "DOCX to PDF conversion failed.");
+  }
+
+  return response.blob();
+}
+
 function normalizeMatchValue(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function getTemplateBaseName(fileName: string | undefined): string {
+  if (!fileName) {
+    return "Generated Letter";
+  }
+  const withoutExt = fileName.replace(/\.[^.]+$/, "").trim();
+  return withoutExt.length > 0 ? withoutExt : "Generated Letter";
+}
+
+function sanitizeFilePart(value: string): string {
+  return value.replace(/[\\/:*?"<>|]/g, "_").trim();
+}
+
+function buildLetterFileName(templateFileName: string | undefined, donorName: string, ext: string): string {
+  const base = sanitizeFilePart(getTemplateBaseName(templateFileName));
+  const payer = sanitizeFilePart(donorName);
+  return `${base} - ${payer}.${ext}`;
+}
+
+function csvRowsToCsv(rows: Record<string, string>[]): string {
+  if (rows.length === 0) {
+    return "";
+  }
+
+  const headers = Array.from(
+    rows.reduce((set, row) => {
+      Object.keys(row).forEach((key) => set.add(key));
+      return set;
+    }, new Set<string>()),
+  );
+
+  const escapeCell = (value: string) => {
+    const text = value ?? "";
+    if (/[",\n\r]/.test(text)) {
+      return `"${text.replaceAll('"', '""')}"`;
+    }
+    return text;
+  };
+
+  const lines = [headers.join(",")];
+  for (const row of rows) {
+    lines.push(headers.map((header) => escapeCell(row[header] ?? "")).join(","));
+  }
+
+  return lines.join("\r\n");
 }
 
 function extractTemplateParameters(templateText: string): string[] {
@@ -208,6 +267,12 @@ function buildTemplateReplacementsFromRow(
     value,
   }));
 
+  for (const [key, value] of Object.entries(row)) {
+    if (value.trim().length > 0) {
+      replacements[key] = value;
+    }
+  }
+
   for (const token of templateParameters) {
     if (isTodaysDateToken(token)) {
       replacements[token] = today;
@@ -215,6 +280,33 @@ function buildTemplateReplacementsFromRow(
     }
 
     const tokenNorm = normalizeTemplateKey(token);
+    if (tokenNorm === "date") {
+      replacements[token] = today;
+      continue;
+    }
+
+    if (
+      tokenNorm === "parent guardian name" ||
+      tokenNorm === "parent name" ||
+      tokenNorm === "donor name" ||
+      tokenNorm === "name" ||
+      tokenNorm === "payer name" ||
+      tokenNorm === "payor name"
+    ) {
+      const payerName = getCsvRowValue(row, [
+        "Parent/Guardian Name",
+        "Parent Name",
+        "Donor Name",
+        "Payor Name",
+        "Payer Name",
+        "Name",
+      ]);
+      if (payerName) {
+        replacements[token] = payerName;
+        continue;
+      }
+    }
+
     const found = normalizedEntries.find((entry) => entry.norm === tokenNorm);
     if (found && found.value.trim().length > 0) {
       replacements[token] = found.value;
@@ -306,7 +398,8 @@ export default function Home({ forcedMode }: HomeProps = {}) {
   const [step2SpreadsheetSource, setStep2SpreadsheetSource] = useState<
     "upload" | "current"
   >("current");
-  const [step2YearOverride, setStep2YearOverride] = useState<string>("");
+  const [step2InputMode, setStep2InputMode] = useState<"ready" | "merge">("ready");
+  const [step2YearOverride] = useState<string>("");
   const [letterFormat, setLetterFormat] = useState<LetterFormat>("word");
   const [sendingEmailDonor, setSendingEmailDonor] = useState<string | null>(null);
   const [donationsViewMode, setDonationsViewMode] =
@@ -316,6 +409,8 @@ export default function Home({ forcedMode }: HomeProps = {}) {
   const [individualSortKey, setIndividualSortKey] =
     useState<IndividualSortKey>("name");
   const [totalSortKey, setTotalSortKey] = useState<TotalSortKey>("name");
+
+  const hasDocxTemplateLoaded = Boolean(letterTemplateBuffer);
 
   useEffect(() => {
     if (isExtractWorkflowMode) {
@@ -343,12 +438,6 @@ export default function Home({ forcedMode }: HomeProps = {}) {
       setCurrentPanel(panelValue);
     }
   }, [isExtractWorkflowMode, isGenerateLettersWorkflowMode]);
-
-  useEffect(() => {
-    if (isGenerateLettersWorkflowMode) {
-      setLetterFormat("word");
-    }
-  }, [isGenerateLettersWorkflowMode]);
 
   function isPanelVisible(panelIndex: number): boolean {
     if (isExtractWorkflowMode) {
@@ -558,6 +647,13 @@ export default function Home({ forcedMode }: HomeProps = {}) {
   }, [activeBatch]);
 
   useEffect(() => {
+    if (step2InputMode === "ready") {
+      setStep2TemplateParamsSpreadsheet(null);
+      setStep2TemplateParamRows([]);
+    }
+  }, [step2InputMode]);
+
+  useEffect(() => {
     if (step2SpreadsheetSource !== "upload") {
       return;
     }
@@ -612,6 +708,7 @@ export default function Home({ forcedMode }: HomeProps = {}) {
           : record.email;
 
       return {
+        ...defaultRow,
         ...extraParams,
         Name: record.name,
         Date: record.date,
@@ -709,12 +806,33 @@ export default function Home({ forcedMode }: HomeProps = {}) {
       return;
     }
 
-    const csv = donationsToCsv(enrichedActiveDonations, statementYear, !isExtractWorkflowMode);
+    const csv = donationsToCsv(
+      enrichedActiveDonations,
+      statementYear,
+      !isExtractWorkflowMode,
+      isExtractWorkflowMode ? "Payment Date" : "Date",
+    );
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
     link.download = `contributions_${selectedBatchId || "batch"}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleDownloadMergedCsv() {
+    if (step2UploadedRows.length === 0) {
+      setError("No merged rows available to download.");
+      return;
+    }
+
+    const csv = csvRowsToCsv(step2UploadedRows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "Payor_file_Merge.csv";
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -809,11 +927,7 @@ export default function Home({ forcedMode }: HomeProps = {}) {
     try {
       const zip = new JSZip();
 
-      if (
-        letterTemplateBuffer &&
-        step2SpreadsheetSource === "upload" &&
-        step2UploadedRows.length > 0
-      ) {
+      if (letterTemplateBuffer && step2SpreadsheetSource === "upload" && step2UploadedRows.length > 0) {
         for (let index = 0; index < step2UploadedRows.length; index += 1) {
           const row = step2UploadedRows[index];
           const donorName =
@@ -826,30 +940,42 @@ export default function Home({ forcedMode }: HomeProps = {}) {
             effectiveLetterYear,
             templateParameters,
           );
-          const blob = await renderDocxTemplate(letterTemplateBuffer, replacements);
-          zip.file(getDocxLetterFileName(donorName), blob);
+          const docxBlob = await renderDocxTemplate(letterTemplateBuffer, replacements);
+          if (letterFormat === "pdf") {
+            const pdfBlob = await convertDocxBlobToPdfBlob(
+              docxBlob,
+              buildLetterFileName(letterTemplateFile?.name, donorName, "docx"),
+            );
+            zip.file(buildLetterFileName(letterTemplateFile?.name, donorName, "pdf"), pdfBlob);
+          } else {
+            zip.file(buildLetterFileName(letterTemplateFile?.name, donorName, "docx"), docxBlob);
+          }
         }
 
         const zipBlob = await zip.generateAsync({ type: "blob" });
         const zipUrl = URL.createObjectURL(zipBlob);
         const link = document.createElement("a");
         link.href = zipUrl;
-        link.download = `AAPASD_Thank_You_Letters_docx_${selectedBatchId || "batch"}.zip`;
+        const formatName = letterFormat === "pdf" ? "pdf" : "docx";
+        link.download = `AAPASD_Thank_You_Letters_${formatName}_${selectedBatchId || "batch"}.zip`;
         link.click();
         URL.revokeObjectURL(zipUrl);
         return;
       }
 
       for (const [donorName, donations] of groupedByDonor) {
+        const templateReplacements = getTemplateReplacementsForDonor(donorName, donations);
         if (letterTemplateBuffer) {
-          const replacements = buildDonorTemplateReplacements(
-            donorName,
-            donations,
-            effectiveLetterYear,
-            templateParameters,
-          );
-          const blob = await renderDocxTemplate(letterTemplateBuffer, replacements);
-          zip.file(getDocxLetterFileName(donorName), blob);
+          const docxBlob = await renderDocxTemplate(letterTemplateBuffer, templateReplacements);
+          if (letterFormat === "pdf") {
+            const pdfBlob = await convertDocxBlobToPdfBlob(
+              docxBlob,
+              buildLetterFileName(letterTemplateFile?.name, donorName, "docx"),
+            );
+            zip.file(buildLetterFileName(letterTemplateFile?.name, donorName, "pdf"), pdfBlob);
+          } else {
+            zip.file(buildLetterFileName(letterTemplateFile?.name, donorName, "docx"), docxBlob);
+          }
         } else if (letterFormat === "word") {
           const blob = await getThankYouLetterWordBlob(
             donorName,
@@ -857,9 +983,10 @@ export default function Home({ forcedMode }: HomeProps = {}) {
             {
               statementYear: effectiveLetterYear,
               templateText: letterTemplateText,
+              templateReplacements,
             },
           );
-          zip.file(getThankYouLetterWordFileName(donorName), blob);
+          zip.file(buildLetterFileName(letterTemplateFile?.name, donorName, "docx"), blob);
         } else {
           const blob = await getThankYouLetterBlob(
             donorName,
@@ -867,9 +994,10 @@ export default function Home({ forcedMode }: HomeProps = {}) {
             {
               statementYear: effectiveLetterYear,
               templateText: letterTemplateText,
+              templateReplacements,
             },
           );
-          zip.file(getThankYouLetterFileName(donorName), blob);
+          zip.file(buildLetterFileName(letterTemplateFile?.name, donorName, "pdf"), blob);
         }
       }
 
@@ -877,7 +1005,7 @@ export default function Home({ forcedMode }: HomeProps = {}) {
       const zipUrl = URL.createObjectURL(zipBlob);
       const link = document.createElement("a");
       link.href = zipUrl;
-      const formatName = letterTemplateBuffer ? "docx" : letterFormat;
+      const formatName = letterFormat === "pdf" ? "pdf" : "docx";
       link.download = `AAPASD_Thank_You_Letters_${formatName}_${selectedBatchId || "batch"}.zip`;
       link.click();
       URL.revokeObjectURL(zipUrl);
@@ -901,8 +1029,11 @@ export default function Home({ forcedMode }: HomeProps = {}) {
     }
 
     try {
-      const text = await file.text();
-      const genericRows = parseCsvRowsGeneric(text);
+      const genericRows = await parseSpreadsheetRowsGeneric(file);
+      if (step2InputMode === "ready") {
+        setStep2TemplateParamsSpreadsheet(null);
+        setStep2TemplateParamRows([]);
+      }
       const parsedRows = genericRows
         .map((row) => {
           const name = getCsvRowValue(row, [
@@ -917,12 +1048,22 @@ export default function Home({ forcedMode }: HomeProps = {}) {
           const email =
             getCsvRowValue(row, ["Email", "\\email", "e-mail", "email address"]) || "N/A";
 
-          if (!name || !date || !amount || !paymentType) {
+          const requiresStrictDefaults = step2InputMode === "merge";
+          if (!name || !amount || (requiresStrictDefaults && (!date || !paymentType))) {
             return null;
           }
 
+          const resolvedDate = date || new Date().toLocaleDateString("en-US");
+          const resolvedPaymentType = paymentType || "N/A";
+
           return {
-            record: { name, date, amount, paymentType, email } as DonationRecord,
+            record: {
+              name,
+              date: resolvedDate,
+              amount,
+              paymentType: resolvedPaymentType,
+              email,
+            } as DonationRecord,
             row,
           };
         })
@@ -932,7 +1073,9 @@ export default function Home({ forcedMode }: HomeProps = {}) {
 
       if (records.length === 0) {
         throw new Error(
-          "Default CSV must include rows with Name, Date, Amount, and Payment Type.",
+          step2InputMode === "merge"
+            ? "Default CSV must include rows with Name, Date, Amount, and Payment Type."
+            : "Ready CSV must include at least Name and Amount columns with data rows.",
         );
       }
 
@@ -947,7 +1090,7 @@ export default function Home({ forcedMode }: HomeProps = {}) {
       const message =
         csvError instanceof Error
           ? csvError.message
-          : "Could not parse uploaded CSV.";
+          : "Could not parse uploaded spreadsheet.";
       setError(message);
     }
   }
@@ -961,8 +1104,7 @@ export default function Home({ forcedMode }: HomeProps = {}) {
     }
 
     try {
-      const text = await file.text();
-      const genericRows = parseCsvRowsGeneric(text);
+      const genericRows = await parseSpreadsheetRowsGeneric(file);
       setStep2TemplateParamRows(genericRows);
       setError(null);
     } catch (csvError) {
@@ -970,7 +1112,7 @@ export default function Home({ forcedMode }: HomeProps = {}) {
       const message =
         csvError instanceof Error
           ? csvError.message
-          : "Could not parse template-parameter CSV.";
+          : "Could not parse template-parameter spreadsheet.";
       setError(message);
     }
   }
@@ -1064,20 +1206,33 @@ export default function Home({ forcedMode }: HomeProps = {}) {
       let fileName: string;
       if (letterTemplateBuffer) {
         const replacements = getTemplateReplacementsForDonor(donorName, donations);
-        blob = await renderDocxTemplate(letterTemplateBuffer, replacements);
-        fileName = getDocxLetterFileName(donorName);
+        const docxBlob = await renderDocxTemplate(letterTemplateBuffer, replacements);
+        if (letterFormat === "pdf") {
+          blob = await convertDocxBlobToPdfBlob(
+            docxBlob,
+            buildLetterFileName(letterTemplateFile?.name, donorName, "docx"),
+          );
+          fileName = buildLetterFileName(letterTemplateFile?.name, donorName, "pdf");
+        } else {
+          blob = docxBlob;
+          fileName = buildLetterFileName(letterTemplateFile?.name, donorName, "docx");
+        }
       } else if (letterFormat === "word") {
+        const templateReplacements = getTemplateReplacementsForDonor(donorName, donations);
         blob = await getThankYouLetterWordBlob(donorName, donations, {
           templateText: letterTemplateText,
           statementYear: effectiveLetterYear,
+          templateReplacements,
         });
-        fileName = getThankYouLetterWordFileName(donorName);
+        fileName = buildLetterFileName(letterTemplateFile?.name, donorName, "docx");
       } else {
+        const templateReplacements = getTemplateReplacementsForDonor(donorName, donations);
         blob = await getThankYouLetterBlob(donorName, donations, {
           templateText: letterTemplateText,
           statementYear: effectiveLetterYear,
+          templateReplacements,
         });
-        fileName = getThankYouLetterFileName(donorName);
+        fileName = buildLetterFileName(letterTemplateFile?.name, donorName, "pdf");
       }
 
       const response = await fetch("/api/email/send-letter", {
@@ -1252,7 +1407,7 @@ export default function Home({ forcedMode }: HomeProps = {}) {
       <section className="panel-nav">
         <div className="panel-nav-head">
           <p className="hero-kicker">Generate Letters Workflow</p>
-          <p className="muted-text">Template -&gt; CSV -&gt; Generate DOCX + Send Emails</p>
+          <p className="muted-text">Template -&gt; CSV input/merge -&gt; Generate + Send Emails</p>
         </div>
         <div className="panel-nav-actions">
           <Link className="secondary-btn" href="/workflows">
@@ -1484,7 +1639,7 @@ export default function Home({ forcedMode }: HomeProps = {}) {
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>Date</th>
+                  <th>{isExtractWorkflowMode ? "Payment Date" : "Date"}</th>
                   <th>Amount</th>
                   <th>Payment Type</th>
                   {!isExtractWorkflowMode ? <th>Email</th> : null}
@@ -1588,14 +1743,32 @@ export default function Home({ forcedMode }: HomeProps = {}) {
 
             {step2SpreadsheetSource === "upload" ? (
               <>
+                <label className="input-label" htmlFor="step2-input-mode">
+                  Upload mode
+                </label>
+                <select
+                  id="step2-input-mode"
+                  className="select-input"
+                  value={step2InputMode}
+                  disabled={!isTemplateStepComplete}
+                  onChange={(event) =>
+                    setStep2InputMode(event.currentTarget.value as "ready" | "merge")
+                  }
+                >
+                  <option value="ready">Upload ready-to-use CSV (single file)</option>
+                  <option value="merge">Generate merged CSV from two files</option>
+                </select>
+
                 <label className="input-label" htmlFor="step2-csv">
-                  Upload default CSV (Name, Date, Amount, Payment Type)
+                  {step2InputMode === "ready"
+                    ? "Upload ready spreadsheet (.csv or .xlsx)"
+                    : "Upload payor/default spreadsheet (Name, Date, Amount, Payment Type)"}
                 </label>
                 <input
                   id="step2-csv"
                   className="file-input"
                   type="file"
-                  accept=".csv,text/csv"
+                  accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
                   disabled={!isTemplateStepComplete}
                   onChange={(event) => {
                     void handleStep2DefaultCsvFileChange(event.currentTarget.files?.[0] ?? null);
@@ -1603,38 +1776,51 @@ export default function Home({ forcedMode }: HomeProps = {}) {
                 />
                 <p className="muted-text">
                   {step2Spreadsheet
-                    ? `Loaded ${step2UploadedRecords.length} default rows from ${step2Spreadsheet.name}`
-                    : "Upload a default CSV first."}
+                    ? `Loaded ${step2UploadedRecords.length} rows from ${step2Spreadsheet.name}`
+                    : "Upload CSV data file."}
                 </p>
 
-                <label className="input-label" htmlFor="step2-template-params-csv">
-                  Upload template-parameter CSV (all non-default template fields)
-                </label>
-                <input
-                  id="step2-template-params-csv"
-                  className="file-input"
-                  type="file"
-                  accept=".csv,text/csv"
-                  disabled={!isTemplateStepComplete || !step2Spreadsheet}
-                  onChange={(event) => {
-                    void handleStep2TemplateParamsCsvFileChange(
-                      event.currentTarget.files?.[0] ?? null,
-                    );
-                  }}
-                />
-                <p className="muted-text">
-                  {step2TemplateParamsSpreadsheet
-                    ? `Loaded ${step2TemplateParamRows.length} parameter rows from ${step2TemplateParamsSpreadsheet.name}`
-                    : "Optional but recommended: upload parameter CSV to fill template-specific fields."}
-                </p>
-                <p className="muted-text">
-                  Matching rule: the first column in the parameter CSV is used as the key (for example,
-                  <code>Name</code>) and matched to the same column in the default CSV.
-                </p>
-                {hasStep2RowCountMismatch ? (
-                  <p className="warning-text">
-                    Warning: default CSV rows and parameter CSV rows count do not match. Matching uses the first column of the parameter CSV.
-                  </p>
+                {step2InputMode === "merge" ? (
+                  <>
+                    <label className="input-label" htmlFor="step2-template-params-csv">
+                      Upload camp data / parameter spreadsheet (.csv or .xlsx)
+                    </label>
+                    <input
+                      id="step2-template-params-csv"
+                      className="file-input"
+                      type="file"
+                      accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                      disabled={!isTemplateStepComplete || !step2Spreadsheet}
+                      onChange={(event) => {
+                        void handleStep2TemplateParamsCsvFileChange(
+                          event.currentTarget.files?.[0] ?? null,
+                        );
+                      }}
+                    />
+                    <p className="muted-text">
+                      {step2TemplateParamsSpreadsheet
+                        ? `Loaded ${step2TemplateParamRows.length} rows from ${step2TemplateParamsSpreadsheet.name}`
+                        : "Upload second CSV to merge by payor name."}
+                    </p>
+                    <p className="muted-text">
+                      Matching rule: first column in this file is used as key and matched to the same
+                      column in the payor/default CSV.
+                    </p>
+                    {hasStep2RowCountMismatch ? (
+                      <p className="warning-text">
+                        Warning: row counts differ between the two files. Matching uses key column and
+                        then keeps unmatched payor rows.
+                      </p>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="secondary-btn"
+                      disabled={step2UploadedRows.length === 0}
+                      onClick={handleDownloadMergedCsv}
+                    >
+                      Download Merged CSV
+                    </button>
+                  </>
                 ) : null}
                 {visibleTemplateParameters.length > 0 ? (
                   <p className="muted-text">
@@ -1657,51 +1843,29 @@ export default function Home({ forcedMode }: HomeProps = {}) {
 
           <div className={`workflow-step-box ${!isDataStepComplete ? "is-locked" : ""}`}>
             <p className="hero-kicker">Step 3</p>
-            <h3 className="card-title">Generate DOCX and Preview on Website</h3>
+            <h3 className="card-title">Generate Documents</h3>
             {!isDataStepComplete ? (
               <p className="warning-text">Complete Step 2 first to unlock generation.</p>
             ) : null}
 
-            <label className="input-label" htmlFor="step2-year-override">
-              Donation year override (optional)
+            <label className="input-label" htmlFor="step2-letter-format">
+              Output format
             </label>
-            <input
-              id="step2-year-override"
-              className="file-input"
-              type="number"
-              min={2000}
-              max={2099}
+            <select
+              id="step2-letter-format"
+              className="select-input"
+              value={letterFormat}
               disabled={!isDataStepComplete}
-              placeholder={statementYear ? `Detected: ${statementYear}` : "Detected automatically"}
-              value={step2YearOverride}
-              onChange={(event) => setStep2YearOverride(event.currentTarget.value)}
-            />
-
-            <p className="muted-text">
-              If left blank, year is auto-detected from selected statement batch or spreadsheet rows.
-            </p>
-            {!isGenerateLettersWorkflowMode ? (
-              <>
-                <label className="input-label" htmlFor="step2-letter-format">
-                  Letter format
-                </label>
-                <select
-                  id="step2-letter-format"
-                  className="select-input"
-                  value={letterFormat}
-                  disabled={!isDataStepComplete}
-                  onChange={(event) => setLetterFormat(event.currentTarget.value as LetterFormat)}
-                >
-                  <option value="pdf">PDF (.pdf)</option>
-                  <option value="word">Word (.docx)</option>
-                </select>
-              </>
-            ) : (
-              <p className="muted-text">Output format: DOCX (.docx)</p>
-            )}
-            <p className="muted-text">
-              Current letter year for on-page donor downloads: {effectiveLetterYear ?? "Auto"}
-            </p>
+              onChange={(event) => setLetterFormat(event.currentTarget.value as LetterFormat)}
+            >
+              <option value="word">DOCX</option>
+              <option value="pdf">PDF</option>
+            </select>
+            {hasDocxTemplateLoaded && letterFormat === "pdf" ? (
+              <p className="muted-text">
+                PDF is generated by converting the filled DOCX template via LibreOffice.
+              </p>
+            ) : null}
             <button
               type="button"
               className="cta-btn"
@@ -1741,27 +1905,61 @@ export default function Home({ forcedMode }: HomeProps = {}) {
                               donorName,
                               donations,
                             );
-                            const blob = await renderDocxTemplate(letterTemplateBuffer, replacements);
-                            const url = URL.createObjectURL(blob);
+                            const docxBlob = await renderDocxTemplate(letterTemplateBuffer, replacements);
                             const link = document.createElement("a");
-                            link.href = url;
-                            link.download = getDocxLetterFileName(donorName);
-                            link.click();
-                            URL.revokeObjectURL(url);
+                            if (letterFormat === "pdf") {
+                              const pdfBlob = await convertDocxBlobToPdfBlob(
+                                docxBlob,
+                                buildLetterFileName(letterTemplateFile?.name, donorName, "docx"),
+                              );
+                              const pdfUrl = URL.createObjectURL(pdfBlob);
+                              link.href = pdfUrl;
+                              link.download = buildLetterFileName(letterTemplateFile?.name, donorName, "pdf");
+                              link.click();
+                              URL.revokeObjectURL(pdfUrl);
+                            } else {
+                              const docxUrl = URL.createObjectURL(docxBlob);
+                              link.href = docxUrl;
+                              link.download = buildLetterFileName(letterTemplateFile?.name, donorName, "docx");
+                              link.click();
+                              URL.revokeObjectURL(docxUrl);
+                            }
                             return;
                           }
 
-                          if (letterFormat === "word") {
-                            await downloadThankYouLetterWord(donorName, donations, {
-                              templateText: letterTemplateText,
-                              statementYear: effectiveLetterYear,
-                            });
-                          } else {
-                            await downloadThankYouLetter(donorName, donations, {
-                              templateText: letterTemplateText,
-                              statementYear: effectiveLetterYear,
-                            });
-                          }
+                    if (letterFormat === "word") {
+                      const templateReplacements = getTemplateReplacementsForDonor(
+                        donorName,
+                        donations,
+                      );
+                      const blob = await getThankYouLetterWordBlob(donorName, donations, {
+                        templateText: letterTemplateText,
+                        statementYear: effectiveLetterYear,
+                        templateReplacements,
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement("a");
+                      link.href = url;
+                      link.download = buildLetterFileName(letterTemplateFile?.name, donorName, "docx");
+                      link.click();
+                      URL.revokeObjectURL(url);
+                    } else {
+                      const templateReplacements = getTemplateReplacementsForDonor(
+                        donorName,
+                        donations,
+                      );
+                      const blob = await getThankYouLetterBlob(donorName, donations, {
+                        templateText: letterTemplateText,
+                        statementYear: effectiveLetterYear,
+                        templateReplacements,
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement("a");
+                      link.href = url;
+                      link.download = buildLetterFileName(letterTemplateFile?.name, donorName, "pdf");
+                      link.click();
+                      URL.revokeObjectURL(url);
+                    }
                         }}
                       >
                         Download Letter
@@ -1928,42 +2126,64 @@ export default function Home({ forcedMode }: HomeProps = {}) {
                         donorName,
                         donations,
                       );
-                      const blob = await renderDocxTemplate(letterTemplateBuffer, replacements);
-                      const url = URL.createObjectURL(blob);
+                      const docxBlob = await renderDocxTemplate(letterTemplateBuffer, replacements);
                       const link = document.createElement("a");
-                      link.href = url;
-                      link.download = getDocxLetterFileName(donorName);
-                      link.click();
-                      URL.revokeObjectURL(url);
+                      if (letterFormat === "pdf") {
+                        const pdfBlob = await convertDocxBlobToPdfBlob(
+                          docxBlob,
+                          buildLetterFileName(letterTemplateFile?.name, donorName, "docx"),
+                        );
+                        const pdfUrl = URL.createObjectURL(pdfBlob);
+                        link.href = pdfUrl;
+                        link.download = buildLetterFileName(letterTemplateFile?.name, donorName, "pdf");
+                        link.click();
+                        URL.revokeObjectURL(pdfUrl);
+                      } else {
+                        const docxUrl = URL.createObjectURL(docxBlob);
+                        link.href = docxUrl;
+                        link.download = buildLetterFileName(letterTemplateFile?.name, donorName, "docx");
+                        link.click();
+                        URL.revokeObjectURL(docxUrl);
+                      }
                       return;
                     }
 
                     if (letterFormat === "word") {
-                      await downloadThankYouLetterWord(
+                      const templateReplacements = getTemplateReplacementsForDonor(
                         donorName,
                         donations,
-                        {
-                          statementYear: effectiveLetterYear,
-                          templateText: letterTemplateText,
-                        },
                       );
+                      const blob = await getThankYouLetterWordBlob(donorName, donations, {
+                        statementYear: effectiveLetterYear,
+                        templateText: letterTemplateText,
+                        templateReplacements,
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement("a");
+                      link.href = url;
+                      link.download = buildLetterFileName(letterTemplateFile?.name, donorName, "docx");
+                      link.click();
+                      URL.revokeObjectURL(url);
                     } else {
-                      await downloadThankYouLetter(
+                      const templateReplacements = getTemplateReplacementsForDonor(
                         donorName,
                         donations,
-                        {
-                          statementYear: effectiveLetterYear,
-                          templateText: letterTemplateText,
-                        },
                       );
+                      const blob = await getThankYouLetterBlob(donorName, donations, {
+                        statementYear: effectiveLetterYear,
+                        templateText: letterTemplateText,
+                        templateReplacements,
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement("a");
+                      link.href = url;
+                      link.download = buildLetterFileName(letterTemplateFile?.name, donorName, "pdf");
+                      link.click();
+                      URL.revokeObjectURL(url);
                     }
                   }}
                 >
-                  {letterTemplateBuffer
-                    ? "Download letter DOCX"
-                    : letterFormat === "word"
-                      ? "Download letter Word"
-                      : "Download letter PDF"}
+                  {letterFormat === "word" ? "Download letter DOCX" : "Download letter PDF"}
                 </button>
               </article>
             );

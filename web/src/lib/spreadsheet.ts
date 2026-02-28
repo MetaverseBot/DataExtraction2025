@@ -12,10 +12,11 @@ export function donationsToCsv(
   records: DonationRecord[],
   defaultYear?: number,
   includeEmail = true,
+  dateHeader = "Date",
 ): string {
   const header = includeEmail
-    ? ["Name", "Date", "Amount", "Payment Type", "Email"]
-    : ["Name", "Date", "Amount", "Payment Type"];
+    ? ["Name", dateHeader, "Amount", "Payment Type", "Email"]
+    : ["Name", dateHeader, "Amount", "Payment Type"];
   const rows = records.map((record) => [
     record.name,
     normalizeDateForCsv(record.date, defaultYear),
@@ -204,6 +205,53 @@ export function parseCsvRowsGeneric(csvText: string): Record<string, string>[] {
       return mapped;
     })
     .filter((row) => Object.values(row).some((value) => value.length > 0));
+}
+
+export async function parseSpreadsheetRowsGeneric(
+  file: File,
+): Promise<Record<string, string>[]> {
+  const fileName = file.name.toLowerCase();
+
+  if (fileName.endsWith(".csv") || fileName.endsWith(".tsv") || fileName.endsWith(".txt")) {
+    return parseCsvRowsGeneric(await file.text());
+  }
+
+  if (fileName.endsWith(".xlsx") || fileName.endsWith(".xls")) {
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const firstSheet = workbook.SheetNames[0];
+    if (!firstSheet) {
+      return [];
+    }
+
+    const sheet = workbook.Sheets[firstSheet];
+    const rows = XLSX.utils.sheet_to_json<string[]>(sheet, {
+      header: 1,
+      raw: false,
+      blankrows: false,
+    });
+
+    if (rows.length === 0) {
+      return [];
+    }
+
+    const [headerRaw, ...dataRows] = rows;
+    const headers = headerRaw.map((cell) => String(cell ?? "").replace(/^\uFEFF/, "").trim());
+
+    return dataRows
+      .map((row) => {
+        const mapped: Record<string, string> = {};
+        headers.forEach((header, index) => {
+          if (header) {
+            mapped[header] = String(row[index] ?? "").trim();
+          }
+        });
+        return mapped;
+      })
+      .filter((row) => Object.values(row).some((value) => value.length > 0));
+  }
+
+  throw new Error("Unsupported file type. Use CSV or Excel (.xlsx/.xls).");
 }
 
 export async function parseDonorDatabaseFile(

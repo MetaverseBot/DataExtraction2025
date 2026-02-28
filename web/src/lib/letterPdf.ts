@@ -5,6 +5,7 @@ import { CampPaymentRow } from "@/lib/spreadsheet";
 type LetterOptions = {
   statementYear?: number;
   templateText?: string;
+  templateReplacements?: Record<string, string>;
 };
 
 let cachedLogoDataUrl: string | null = null;
@@ -139,6 +140,41 @@ export async function getThankYouLetterBlob(
     return `${paymentType} Payment`;
   };
 
+  const totalAmount = donations.reduce((sum, row) => {
+    const value = Number(row.amount.replaceAll("$", "").replaceAll(",", ""));
+    return Number.isFinite(value) ? sum + value : sum;
+  }, 0);
+  const currentYear = options.statementYear ?? new Date().getFullYear();
+  const firstDonation = donations[0];
+  const firstDate = firstDonation
+    ? normalizeContributionDate(firstDonation.date, currentYear)
+    : "";
+  const firstPaymentType = firstDonation ? paymentLabel(firstDonation.paymentType) : "";
+
+  if (options.templateText && options.templateText.trim().length > 0) {
+    const body = buildLetterBody(name, options.templateText, donations.length, totalAmount, {
+      today,
+      firstDate,
+      firstPaymentType,
+      templateReplacements: options.templateReplacements,
+    });
+
+    let y = 50;
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(12);
+    for (const line of body) {
+      const wrapped = pdf.splitTextToSize(line, contentWidth);
+      if (y + wrapped.length * 17 > 760) {
+        pdf.addPage("letter", "portrait");
+        y = 50;
+      }
+      pdf.text(wrapped, marginLeft, y);
+      y += wrapped.length * 17 + 4;
+    }
+
+    return pdf.output("blob");
+  }
+
   let y = 42;
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(21);
@@ -170,15 +206,17 @@ export async function getThankYouLetterBlob(
   y += 30;
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(12);
-  const totalAmount = donations.reduce((sum, row) => {
-    const value = Number(row.amount.replaceAll("$", "").replaceAll(",", ""));
-    return Number.isFinite(value) ? sum + value : sum;
-  }, 0);
   const body = buildLetterBody(
     name,
     options.templateText,
     donations.length,
     totalAmount,
+    {
+      today,
+      firstDate,
+      firstPaymentType,
+      templateReplacements: options.templateReplacements,
+    },
   );
 
   for (const line of body) {
@@ -221,8 +259,6 @@ export async function getThankYouLetterBlob(
   pdf.setFont("helvetica", "normal");
   pdf.setFontSize(11);
   let rowY = startY + rowHeight;
-  const currentYear = options.statementYear ?? new Date().getFullYear();
-
   for (const donation of donations) {
     if (rowY + rowHeight > 760) {
       pdf.addPage("letter", "portrait");
@@ -285,6 +321,10 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export async function getThankYouLetterWordBlob(
   name: string,
   donations: DonationRecord[],
@@ -307,7 +347,22 @@ export async function getThankYouLetterWordBlob(
     const value = Number(row.amount.replaceAll("$", "").replaceAll(",", ""));
     return Number.isFinite(value) ? sum + value : sum;
   }, 0);
-  const bodyLines = buildLetterBody(name, options.templateText, donations.length, totalAmount);
+  const firstDonation = donations[0];
+  const firstDate = firstDonation
+    ? normalizeContributionDate(firstDonation.date, year)
+    : "";
+  const firstPaymentType = firstDonation
+    ? firstDonation.paymentType.toLowerCase().includes("payment")
+      ? firstDonation.paymentType
+      : `${firstDonation.paymentType} Payment`
+    : "";
+
+  const bodyLines = buildLetterBody(name, options.templateText, donations.length, totalAmount, {
+    today,
+    firstDate,
+    firstPaymentType,
+    templateReplacements: options.templateReplacements,
+  });
   const bodyHtml = bodyLines
     .map((line) => {
       if (!line.trim()) {
@@ -668,16 +723,56 @@ function buildLetterBody(
   templateText: string | undefined,
   donationCount: number,
   totalAmount: number,
+  context?: {
+    today?: string;
+    firstDate?: string;
+    firstPaymentType?: string;
+    templateReplacements?: Record<string, string>;
+  },
 ): string[] {
   if (templateText && templateText.trim().length > 0) {
+    const today =
+      context?.today ??
+      new Date().toLocaleDateString("en-US", {
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      });
+    const firstDate = context?.firstDate ?? "";
+    const firstPaymentType = context?.firstPaymentType ?? "";
+
     const filled = templateText
+      .replace(/\u00A0/g, " ")
+      .replace(/\r\n/g, "\n")
+      .replace(/\[\s*today['’]?s\s*date\s*\]/gi, today)
+      .replace(/\[\s*date\s*\]/gi, today)
+      .replace(/\[\s*parent\s*\/\s*guardian\s*name\s*\]/gi, donorName)
+      .replace(/\[\s*parent\s*name\s*\]/gi, donorName)
+      .replace(/\[\s*donor\s*name\s*\]/gi, donorName)
+      .replace(/\[\s*payer\s*name\s*\]/gi, donorName)
+      .replace(/\[\s*payor\s*name\s*\]/gi, donorName)
+      .replace(/\[\s*name\s*\]/gi, donorName)
+      .replace(/\[\s*payment\s*date\s*\]/gi, firstDate)
+      .replace(/\[\s*contribution\s*date\s*\]/gi, firstDate)
+      .replace(/\[\s*paid\s*date\s*\]/gi, firstDate)
+      .replace(/\[\s*payment\s*type\s*\]/gi, firstPaymentType)
+      .replace(/\[\s*donation\s*count\s*\]/gi, String(donationCount))
+      .replace(/\[\s*total\s*amount\s*\]/gi, `$${totalAmount.toFixed(2)}`)
+      .replace(/\$\s*\$/g, `$${totalAmount.toFixed(2)}`)
       .replaceAll("{{name}}", donorName)
       .replaceAll("{{donor_name}}", donorName)
       .replaceAll("{{donation_count}}", String(donationCount))
       .replaceAll("{{total_amount}}", `$${totalAmount.toFixed(2)}`)
       .replaceAll("{{organization}}", "Asian American Parent Alliance of San Diego");
 
-    return filled.split(/\r?\n/);
+    let withTemplateReplacements = filled;
+    const templateReplacements = context?.templateReplacements ?? {};
+    for (const [key, value] of Object.entries(templateReplacements)) {
+      const pattern = new RegExp(`\\[\\s*${escapeRegex(key)}\\s*\\]`, "gi");
+      withTemplateReplacements = withTemplateReplacements.replace(pattern, value ?? "");
+    }
+
+    return withTemplateReplacements.split(/\r?\n/);
   }
 
   return [
