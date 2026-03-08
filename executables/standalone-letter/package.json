@@ -1,0 +1,16 @@
+{
+  "name": "aapasd-letter-generation-standalone",
+  "version": "1.0.0",
+  "private": true,
+  "bin": "letter-generation-standalone.js",
+  "scripts": {
+    "build:exe": "pkg . --targets node18-win-x64 --output \"../Letter Generation.exe\""
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  }
+}

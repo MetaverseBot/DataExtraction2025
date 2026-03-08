@@ -9,7 +9,8 @@ internal static class Program
     {
         Console.Title = "Temp CSV Compare";
         Console.WriteLine("Temp CSV Compare");
-        Console.WriteLine("Compares manual CSV vs generated CSV");
+            Console.WriteLine("Compares manual CSV vs generated CSV");
+            Console.WriteLine("Comparison uses Name + Amount only (dates ignored)");
         Console.WriteLine();
 
         try
@@ -38,7 +39,7 @@ internal static class Program
             Console.WriteLine("Manual header: " + manual.Header);
             Console.WriteLine("Generated header: " + generated.Header);
 
-            bool headerMatch = string.Equals(manual.Header, generated.Header, StringComparison.OrdinalIgnoreCase);
+            bool headerMatch = HeaderHasRequiredColumns(manual.Header) && HeaderHasRequiredColumns(generated.Header);
             Console.WriteLine("Header match: " + (headerMatch ? "YES" : "NO"));
             Console.WriteLine();
 
@@ -117,8 +118,43 @@ internal static class Program
 
         CsvData data = new CsvData();
         data.Header = lines[0];
-        data.Rows = lines.Skip(1).ToList();
+        data.Rows = lines.Skip(1)
+            .Select(NormalizeComparisonRow)
+            .Where(row => row.Length > 0)
+            .ToList();
         return data;
+    }
+
+    private static bool HeaderHasRequiredColumns(string header)
+    {
+        string[] parts = header.Split(',');
+        if (parts.Length < 3)
+        {
+            return false;
+        }
+
+        string first = parts[0].Trim();
+        string third = parts[2].Trim();
+        return first.Equals("Name", StringComparison.OrdinalIgnoreCase)
+            && third.Equals("Amount", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeComparisonRow(string row)
+    {
+        string[] parts = row.Split(',');
+        if (parts.Length < 3)
+        {
+            return "";
+        }
+
+        string name = parts[0].Trim();
+        string amount = parts[2].Trim();
+        if (name.Length == 0 || amount.Length == 0)
+        {
+            return "";
+        }
+
+        return name + "," + amount;
     }
 
     private static Dictionary<string, int> ToCounts(List<string> rows)

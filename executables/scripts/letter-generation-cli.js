@@ -34,6 +34,24 @@ function normalizeToken(value) {
     .replace(/[\u00A0\s]+/g, " ");
 }
 
+function formatDateValue(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const month = String(value.getMonth() + 1);
+    const day = String(value.getDate());
+    const year = String(value.getFullYear());
+    return `${month}/${day}/${year}`;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value) && value > 20000 && value < 60000) {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed) {
+      return `${parsed.m}/${parsed.d}/${parsed.y}`;
+    }
+  }
+
+  return String(value ?? "").trim();
+}
+
 function todayLong() {
   return new Date().toLocaleDateString("en-US", {
     month: "long",
@@ -71,13 +89,20 @@ function getBaseName(filePath) {
 }
 
 function readSpreadsheetRows(filePath) {
-  const workbook = XLSX.readFile(filePath, { raw: false, cellDates: false });
+  const workbook = XLSX.readFile(filePath, { raw: true, cellDates: true });
   const sheetName = workbook.SheetNames[0];
   if (!sheetName) {
     return [];
   }
   const sheet = workbook.Sheets[sheetName];
-  return XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: true });
+  return rows.map((row) => {
+    const normalizedRow = {};
+    for (const [key, value] of Object.entries(row)) {
+      normalizedRow[key] = formatDateValue(value);
+    }
+    return normalizedRow;
+  });
 }
 
 function detectNameColumn(headers) {
@@ -115,6 +140,56 @@ function buildReplacementMap(row) {
   return map;
 }
 
+function buildReplacementEntries(row) {
+  const entries = [];
+  const seen = new Set();
+
+  const addEntry = (token, value) => {
+    const normalizedToken = String(token ?? "").trim();
+    if (!normalizedToken) {
+      return;
+    }
+    const key = `${normalizedToken}::${String(value ?? "")}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    entries.push({ token: normalizedToken, value: String(value ?? "") });
+  };
+
+  for (const [key, value] of Object.entries(row)) {
+    addEntry(key, value);
+  }
+
+  const today = todayLong();
+  addEntry("Today's Date", today);
+  addEntry("Today’s Date", today);
+  addEntry("Todays Date", today);
+  addEntry("Today Date", today);
+
+  const amountValue = Object.entries(row).find(([key]) => normalizeToken(key) === "amount")?.[1];
+  if (amountValue) {
+    addEntry("Amount", amountValue);
+  }
+
+  const paymentDateValue = Object.entries(row).find(([key]) => normalizeToken(key) === "payment date")?.[1];
+  if (paymentDateValue) {
+    addEntry("Payment Date", paymentDateValue);
+    addEntry("Contribution Date", paymentDateValue);
+    addEntry("Paid Date", paymentDateValue);
+  }
+
+  const nameValue = Object.entries(row).find(([key]) => normalizeToken(key).includes("name"))?.[1];
+  if (nameValue) {
+    addEntry("Name", nameValue);
+    addEntry("Donor Name", nameValue);
+    addEntry("Parent Name", nameValue);
+    addEntry("Parent/Guardian Name", nameValue);
+  }
+
+  return entries;
+}
+
 function replaceBracketTokensInText(templateText, replacementMap) {
   return templateText.replace(/\[([^\]]+)\]/g, (fullMatch, tokenInner) => {
     const normalized = normalizeToken(tokenInner);
@@ -125,7 +200,7 @@ function replaceBracketTokensInText(templateText, replacementMap) {
   });
 }
 
-async function renderDocxTemplate(templateBuffer, replacementMap) {
+async function renderDocxTemplate(templateBuffer, replacementMap, replacementEntries) {
   const zip = await JSZip.loadAsync(templateBuffer);
   const xmlPaths = Object.keys(zip.files).filter(
     (xmlPath) => xmlPath.startsWith("word/") && xmlPath.endsWith(".xml"),
@@ -150,16 +225,11 @@ async function renderDocxTemplate(templateBuffer, replacementMap) {
       return tokens.get(normalized);
     });
 
-    for (const [normalizedKey, value] of tokens.entries()) {
-      for (const match of updated.matchAll(/\[([^\]]+)\]/g)) {
-        const fullToken = match[0];
-        const tokenInner = match[1];
-        if (normalizeToken(tokenInner) !== normalizedKey) {
-          continue;
-        }
-        const splitTokenPattern = buildSplitTokenRegex(fullToken);
-        updated = updated.replace(splitTokenPattern, value);
-      }
+    for (const entry of replacementEntries) {
+      const token = `[${entry.token}]`;
+      const value = escapeXml(entry.value);
+      updated = updated.split(token).join(value);
+      updated = updated.replace(buildSplitTokenRegex(token), value);
     }
 
     zip.file(xmlPath, updated);
@@ -230,10 +300,15 @@ async function main() {
         for (let index = 0; index < rows.length; index += 1) {
           const row = rows[index];
           const replacementMap = buildReplacementMap(row);
+          const replacementEntries = buildReplacementEntries(row);
           const donorName = sanitizeFilePart(row[nameColumn] || `Row_${index + 1}`) || `Row_${index + 1}`;
           const outputName = `Letter - ${spreadsheetBase} - ${donorName}.docx`;
           const outputPath = path.join(outputFolder, outputName);
-          const renderedBuffer = await renderDocxTemplate(templateBuffer, replacementMap);
+          const renderedBuffer = await renderDocxTemplate(
+            templateBuffer,
+            replacementMap,
+            replacementEntries,
+          );
           fs.writeFileSync(outputPath, renderedBuffer);
           totalLetters += 1;
         }

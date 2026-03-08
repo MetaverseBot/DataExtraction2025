@@ -10,7 +10,16 @@ function requireFromWeb(moduleName) {
 const XLSX = requireFromWeb("xlsx");
 
 function ask(rl, question) {
-  return new Promise((resolve) => rl.question(question, (answer) => resolve(answer.trim())));
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      const trimmed = answer.trim();
+      const unquoted = trimmed
+        .replace(/^"(.*)"$/, "$1")
+        .replace(/^'(.*)'$/, "$1")
+        .trim();
+      resolve(unquoted);
+    });
+  });
 }
 
 function normalizeName(value) {
@@ -40,10 +49,6 @@ function readSpreadsheetRows(filePath) {
   }
   const sheet = workbook.Sheets[sheetName];
   return XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
-}
-
-function chooseDefaultInputFiles(inputFolder) {
-  return fs.readdirSync(inputFolder).filter((name) => /\.(csv|xlsx|xls)$/i.test(name));
 }
 
 function toCsv(rows) {
@@ -76,44 +81,26 @@ async function main() {
 
   try {
     console.log("File Merge");
-    console.log("Input: Payment spreadsheet + payor data sheet folder");
+    console.log("Input: Donor file path + extra data file path");
     console.log("Output: Merged spreadsheet matched by name");
     console.log("");
 
-    const inputFolder = await ask(rl, "Input folder path: ");
+    const donorFilePath = await ask(rl, "Donor file path: ");
+    const extraDataFilePath = await ask(rl, "Extra data file path: ");
     const outputFolder = await ask(rl, "Output folder path: ");
 
-    if (!fs.existsSync(inputFolder) || !fs.statSync(inputFolder).isDirectory()) {
-      throw new Error("Input folder does not exist.");
+    if (!fs.existsSync(donorFilePath) || !fs.statSync(donorFilePath).isFile()) {
+      throw new Error("Donor file was not found.");
+    }
+    if (!fs.existsSync(extraDataFilePath) || !fs.statSync(extraDataFilePath).isFile()) {
+      throw new Error("Extra data file was not found.");
     }
     if (!fs.existsSync(outputFolder) || !fs.statSync(outputFolder).isDirectory()) {
       throw new Error("Output folder does not exist.");
     }
 
-    const candidates = chooseDefaultInputFiles(inputFolder);
-    if (candidates.length < 2) {
-      throw new Error("Input folder needs at least two spreadsheet files (.csv/.xlsx/.xls).");
-    }
-
-    console.log("Spreadsheets found:");
-    candidates.forEach((file) => console.log(`- ${file}`));
-    console.log("");
-
-    const paymentFileName = await ask(rl, "Payment spreadsheet file name: ");
-    const dataFileName = await ask(rl, "Data sheet file name: ");
-
-    const paymentFilePath = path.join(inputFolder, paymentFileName);
-    const dataFilePath = path.join(inputFolder, dataFileName);
-
-    if (!fs.existsSync(paymentFilePath)) {
-      throw new Error("Payment spreadsheet file was not found.");
-    }
-    if (!fs.existsSync(dataFilePath)) {
-      throw new Error("Data sheet file was not found.");
-    }
-
-    const paymentRows = readSpreadsheetRows(paymentFilePath);
-    const dataRows = readSpreadsheetRows(dataFilePath);
+    const paymentRows = readSpreadsheetRows(donorFilePath);
+    const dataRows = readSpreadsheetRows(extraDataFilePath);
 
     if (paymentRows.length === 0) {
       throw new Error("Payment spreadsheet has no rows.");
