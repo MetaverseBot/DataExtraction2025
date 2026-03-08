@@ -1,0 +1,15 @@
+{
+  "name": "aapasd-data-extraction-standalone",
+  "version": "1.0.0",
+  "private": true,
+  "bin": "data-extraction-standalone.js",
+  "scripts": {
+    "build:exe": "pkg . --targets node18-win-x64 --output \"../Data Extraction.exe\""
+  },
+  "dependencies": {
+    "pdf-parse": "^1.1.1"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  }
+}
