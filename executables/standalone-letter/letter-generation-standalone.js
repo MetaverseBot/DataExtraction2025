@@ -111,6 +111,50 @@ function detectNameColumn(headers) {
   return headers[0] || null;
 }
 
+function getRowValueByAliases(row, aliases) {
+  const normalizedEntries = Object.entries(row).map(([key, value]) => ({
+    key: normalizeToken(key),
+    value: String(value ?? ""),
+  }));
+
+  for (const alias of aliases) {
+    const normalizedAlias = normalizeToken(alias);
+    const found = normalizedEntries.find((entry) => entry.key === normalizedAlias);
+    if (found && found.value.trim()) {
+      return found.value.trim();
+    }
+  }
+
+  return "";
+}
+
+function groupRowsByDonor(rows, nameColumn) {
+  const groups = [];
+  const byName = new Map();
+
+  for (const row of rows) {
+    const displayName = String(row[nameColumn] ?? "").trim();
+    const key = normalizeToken(displayName);
+    if (!key) {
+      continue;
+    }
+
+    let group = byName.get(key);
+    if (!group) {
+      group = {
+        donorName: displayName,
+        rows: [],
+      };
+      byName.set(key, group);
+      groups.push(group);
+    }
+
+    group.rows.push(row);
+  }
+
+  return groups;
+}
+
 function buildReplacementMap(row) {
   const map = new Map();
   for (const [key, value] of Object.entries(row)) {
@@ -186,7 +230,46 @@ function replaceBracketTokensInText(templateText, replacementMap) {
   });
 }
 
-async function renderDocxTemplate(templateBuffer, replacementMap, replacementEntries) {
+function buildDonationRows(rows, fallbackName) {
+  return rows.map((row) => ({
+    donorName:
+      getRowValueByAliases(row, ["Name", "Donor Name", "Parent Name", "Parent/Guardian Name"]) ||
+      fallbackName,
+    paymentDate:
+      getRowValueByAliases(row, ["Payment Date", "Contribution Date", "Paid Date", "Date"]) || "",
+    amount: getRowValueByAliases(row, ["Amount", "Total Amount"]) || "",
+    paymentType: getRowValueByAliases(row, ["Payment Type", "Payment", "Type"]) || "",
+  }));
+}
+
+function buildDonationReplacementEntries(donation) {
+  return [
+    { token: "Payment Date", value: donation.paymentDate },
+    { token: "Contribution Date", value: donation.paymentDate },
+    { token: "Paid Date", value: donation.paymentDate },
+    { token: "Amount", value: donation.amount },
+    { token: "Payment Type", value: donation.paymentType },
+    { token: "Name", value: donation.donorName },
+    { token: "Donor Name", value: donation.donorName },
+    { token: "Parent Name", value: donation.donorName },
+    { token: "Parent/Guardian Name", value: donation.donorName },
+    { token: "Sponsor", value: donation.donorName },
+    { token: "Sponsor(s)", value: donation.donorName },
+  ];
+}
+
+function applyEntriesToXml(xml, entries) {
+  let updated = xml;
+  for (const entry of entries) {
+    const token = `[${entry.token}]`;
+    const value = escapeXml(entry.value);
+    updated = updated.split(token).join(value);
+    updated = updated.replace(buildSplitTokenRegex(token), value);
+  }
+  return updated;
+}
+
+async function renderDocxTemplate(templateBuffer, replacementMap, replacementEntries, donationRows) {
   const zip = await JSZip.loadAsync(templateBuffer);
   const xmlPaths = Object.keys(zip.files).filter(
     (xmlPath) => xmlPath.startsWith("word/") && xmlPath.endsWith(".xml"),
@@ -203,7 +286,26 @@ async function renderDocxTemplate(templateBuffer, replacementMap, replacementEnt
       continue;
     }
 
-    let updated = xml.replace(/\[([^\]]+)\]/g, (fullMatch, tokenInner) => {
+    let updated = xml;
+
+    if (donationRows.length > 0) {
+      updated = updated.replace(/<w:tr\b[\s\S]*?<\/w:tr>/g, (rowXml) => {
+        const hasDonationToken = buildDonationReplacementEntries(donationRows[0]).some((entry) => {
+          const token = `[${entry.token}]`;
+          return rowXml.includes(token) || buildSplitTokenRegex(token).test(rowXml);
+        });
+
+        if (!hasDonationToken) {
+          return rowXml;
+        }
+
+        return donationRows
+          .map((donation) => applyEntriesToXml(rowXml, buildDonationReplacementEntries(donation)))
+          .join("");
+      });
+    }
+
+    updated = updated.replace(/\[([^\]]+)\]/g, (fullMatch, tokenInner) => {
       const normalized = normalizeToken(tokenInner);
       if (!normalized || !tokens.has(normalized)) {
         return fullMatch;
@@ -277,16 +379,24 @@ async function main() {
 
         const headers = Object.keys(rows[0]);
         const nameColumn = detectNameColumn(headers);
+        const donorGroups = groupRowsByDonor(rows, nameColumn);
         const spreadsheetBase = sanitizeFilePart(getBaseName(spreadsheetFileName));
 
-        for (let index = 0; index < rows.length; index += 1) {
-          const row = rows[index];
+        for (let index = 0; index < donorGroups.length; index += 1) {
+          const group = donorGroups[index];
+          const row = group.rows[0];
           const replacementMap = buildReplacementMap(row);
           const replacementEntries = buildReplacementEntries(row);
-          const donorName = sanitizeFilePart(row[nameColumn] || `Row_${index + 1}`) || `Row_${index + 1}`;
+          const donationRows = buildDonationRows(group.rows, group.donorName);
+          const donorName = sanitizeFilePart(group.donorName || `Row_${index + 1}`) || `Row_${index + 1}`;
           const outputName = `Letter - ${spreadsheetBase} - ${donorName}.docx`;
           const outputPath = path.join(outputFolder, outputName);
-          const renderedBuffer = await renderDocxTemplate(templateBuffer, replacementMap, replacementEntries);
+          const renderedBuffer = await renderDocxTemplate(
+            templateBuffer,
+            replacementMap,
+            replacementEntries,
+            donationRows,
+          );
           fs.writeFileSync(outputPath, renderedBuffer);
           totalLetters += 1;
         }
@@ -302,12 +412,14 @@ async function main() {
 
         const headers = Object.keys(rows[0]);
         const nameColumn = detectNameColumn(headers);
+        const donorGroups = groupRowsByDonor(rows, nameColumn);
         const spreadsheetBase = sanitizeFilePart(getBaseName(spreadsheetFileName));
 
-        for (let index = 0; index < rows.length; index += 1) {
-          const row = rows[index];
+        for (let index = 0; index < donorGroups.length; index += 1) {
+          const group = donorGroups[index];
+          const row = group.rows[0];
           const replacementMap = buildReplacementMap(row);
-          const donorName = sanitizeFilePart(row[nameColumn] || `Row_${index + 1}`) || `Row_${index + 1}`;
+          const donorName = sanitizeFilePart(group.donorName || `Row_${index + 1}`) || `Row_${index + 1}`;
           const outputName = `Letter - ${spreadsheetBase} - ${donorName}${templateExt}`;
           const outputPath = path.join(outputFolder, outputName);
           const renderedText = replaceBracketTokensInText(templateText, replacementMap);
