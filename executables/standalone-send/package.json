@@ -1,0 +1,16 @@
+{
+  "name": "aapasd-send-email-standalone",
+  "version": "1.0.0",
+  "private": true,
+  "bin": "send-email-standalone.js",
+  "scripts": {
+    "build:exe": "pkg . --targets node18-win-x64 --output \"../Send Email.exe\""
+  },
+  "dependencies": {
+    "nodemailer": "^7.0.6",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  }
+}
