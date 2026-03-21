@@ -1,0 +1,12 @@
+{
+  "name": "aapasd-docx-pdf-converter-standalone",
+  "version": "1.0.0",
+  "private": true,
+  "bin": "docx-to-pdf-standalone.js",
+  "scripts": {
+    "build:exe": "pkg . --targets node18-win-x64 --output \"../DOCX to PDF.exe\""
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  }
+}
